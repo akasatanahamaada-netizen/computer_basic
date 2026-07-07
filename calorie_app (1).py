@@ -1,0 +1,445 @@
+import streamlit as st
+import google.generativeai as genai
+from PIL import Image
+import json
+import re
+import os
+import io
+from datetime import datetime, date
+import pandas as pd
+import warnings
+warnings.filterwarnings("ignore")
+
+# ================================================================
+# ページ設定
+# ================================================================
+st.set_page_config(
+    page_title="🍱 AI食事管理アプリ",
+    page_icon="🍱",
+    layout="wide",
+)
+
+# ================================================================
+# カスタムCSS
+# ================================================================
+st.markdown("""
+<style>
+    .main-title {
+        text-align: center;
+        color: #a8d8ea;
+        font-size: 2rem;
+        font-weight: bold;
+        margin-bottom: 0.5rem;
+    }
+    .sub-title {
+        text-align: center;
+        color: #888;
+        font-size: 0.9rem;
+        margin-bottom: 2rem;
+    }
+    .dish-card {
+        background: #1f2b47;
+        padding: 12px 16px;
+        border-radius: 8px;
+        margin-bottom: 8px;
+        color: white;
+    }
+    .advice-card {
+        background: #16213e;
+        padding: 16px;
+        border-radius: 12px;
+        color: #ccc;
+        margin-top: 16px;
+        line-height: 1.8;
+    }
+    .record-item {
+        display: flex;
+        justify-content: space-between;
+        padding: 8px 12px;
+        background: #1f2b47;
+        border-radius: 8px;
+        margin-bottom: 6px;
+        color: #ccc;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ================================================================
+# 日本時間設定
+# ================================================================
+os.environ['TZ'] = 'Asia/Tokyo'
+try:
+    import time
+    time.tzset()
+except:
+    pass
+
+# ================================================================
+# Gemini API設定（Secretsから読み込み）
+# ================================================================
+try:
+    api_key = st.secrets["GEMINI_API_KEY"]
+    genai.configure(api_key=api_key)
+    gemini_ready = True
+except Exception:
+    gemini_ready = False
+    st.error("APIキーが設定されていません。Streamlit Cloudの Settings → Secrets に GEMINI_API_KEY を設定してください。")
+
+# ================================================================
+# セッション状態の初期化
+# ================================================================
+if "meal_log" not in st.session_state:
+    st.session_state.meal_log = []
+
+# ================================================================
+# 運動データベース
+# ================================================================
+EXERCISE_DATABASE = {
+    "ウォーキング（30分）": 1.6,
+    "ジョギング（30分）": 3.5,
+    "ランニング（30分）": 4.9,
+    "自転車（30分）": 3.0,
+    "水泳（30分）": 4.2,
+    "筋トレ（30分）": 2.5,
+    "ヨガ（30分）": 1.3,
+    "階段昇降（30分）": 3.0,
+    "テニス（30分）": 3.4,
+    "サッカー（30分）": 3.7,
+}
+
+# ================================================================
+# 関数定義
+# ================================================================
+def calc_required_calories(height, weight, age, gender, activity):
+    if gender == "男性":
+        bmr = 88.362 + (13.397 * weight) + (4.799 * height) - (5.677 * age)
+    else:
+        bmr = 447.593 + (9.247 * weight) + (3.098 * height) - (4.330 * age)
+    activity_map = {
+        "ほぼ運動しない": 1.2,
+        "軽い運動（週1-3日）": 1.375,
+        "普通の運動（週3-5日）": 1.55,
+        "激しい運動（週6-7日）": 1.725,
+    }
+    return int(bmr * activity_map.get(activity, 1.2))
+
+def calc_ideal_nutrients(required_cal):
+    return {
+        "carb": int(required_cal * 0.60 / 4),
+        "protein": int(required_cal * 0.15 / 4),
+        "fat": int(required_cal * 0.25 / 9),
+    }
+
+def get_today_records():
+    today = date.today().strftime("%Y-%m-%d")
+    return [r for r in st.session_state.meal_log if r["date"] == today]
+
+def estimate_calories_gemini(image):
+    prompt = """この写真に写っている料理をすべて認識してください。
+カロリーや栄養素は、写真に写っている実際の量に基づいて推定してください。
+
+重要：
+- 寿司は1貫あたり約40〜60kcalです。写真の貫数を数えて計算してください。
+- 小鉢や副菜は量が少ないので、カロリーも低く見積もってください。
+- 大盛りや普通盛りなど、見た目の量を考慮してください。
+- 写真に写っている実際の量を正確に反映した数値にしてください。
+
+1つだけの場合も、複数ある場合も、以下のJSON形式で返してください。他のテキストは不要です。
+
+{"dishes": [
+  {
+    "name": "料理名（日本語。寿司なら種類と貫数も書く）",
+    "calories": カロリー（写真の実際の量に基づく数値のみ）,
+    "carb": 炭水化物グラム数（数値のみ）,
+    "protein": タンパク質グラム数（数値のみ）,
+    "fat": 脂質グラム数（数値のみ）,
+    "confidence": 確信度0.0〜1.0,
+    "comment": "この料理についての栄養アドバイス（30文字以内）"
+  }
+]}
+
+複数の料理が写っている場合はすべて含めてください。"""
+
+    try:
+        model = genai.GenerativeModel("models/gemini-2.5-flash-lite")
+        response = model.generate_content([prompt, image])
+        result = response.text.strip()
+        result = re.sub(r'^```json|```$', '', result, flags=re.MULTILINE).strip()
+        data = json.loads(result)
+        dishes = []
+        for d in data.get("dishes", []):
+            dishes.append({
+                "name": d.get("name", "不明な料理"),
+                "calories": int(d.get("calories", 0)),
+                "nutrients": {
+                    "carb": int(d.get("carb", 0)),
+                    "protein": int(d.get("protein", 0)),
+                    "fat": int(d.get("fat", 0)),
+                },
+                "confidence": float(d.get("confidence", 0.5)),
+                "comment": d.get("comment", ""),
+            })
+        if not dishes:
+            raise ValueError("認識できませんでした")
+        return dishes
+    except Exception as e:
+        st.error(f"Gemini認識エラー: {e}")
+        return [{
+            "name": "認識できませんでした",
+            "calories": 0,
+            "nutrients": {"carb": 0, "protein": 0, "fat": 0},
+            "confidence": 0,
+            "comment": "別の角度から撮影してみてください",
+        }]
+
+def generate_ai_advice(consumed, required, consumed_nutrients, ideal_nutrients, today_records):
+    meals = [r["name"] for r in today_records if r["type"] == "meal"]
+    exercises = [r["name"] for r in today_records if r["type"] == "exercise"]
+    remaining = required - consumed
+
+    prompt = f"""あなたは栄養管理の専門家です。以下の情報をもとに、100文字程度で食事アドバイスを日本語で書いてください。
+
+1日の必要カロリー: {required} kcal
+現在の摂取カロリー: {consumed} kcal（残り {remaining} kcal）
+今日食べたもの: {', '.join(meals) if meals else 'まだなし'}
+今日の運動: {', '.join(exercises) if exercises else 'なし'}
+炭水化物: {consumed_nutrients['carb']}g / 理想 {ideal_nutrients['carb']}g
+タンパク質: {consumed_nutrients['protein']}g / 理想 {ideal_nutrients['protein']}g
+脂質: {consumed_nutrients['fat']}g / 理想 {ideal_nutrients['fat']}g
+
+具体的な食材名を挙げて、次に何を食べるべきかアドバイスしてください。"""
+
+    try:
+        model = genai.GenerativeModel("models/gemini-2.5-flash-lite")
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except:
+        return "アドバイスを生成できませんでした。"
+
+# ================================================================
+# サイドバー：プロフィール
+# ================================================================
+with st.sidebar:
+    st.header("👤 あなたの情報")
+    height = st.number_input("身長 (cm)", value=165.0, step=0.1)
+    weight = st.number_input("体重 (kg)", value=60.0, step=0.1)
+    age = st.number_input("年齢", value=20, step=1)
+    gender = st.radio("性別", ["男性", "女性"])
+    activity = st.selectbox("活動量", [
+        "ほぼ運動しない",
+        "軽い運動（週1-3日）",
+        "普通の運動（週3-5日）",
+        "激しい運動（週6-7日）",
+    ])
+
+    required = calc_required_calories(height, weight, age, gender, activity)
+    ideal = calc_ideal_nutrients(required)
+    st.metric("1日の必要カロリー", f"{required} kcal")
+
+    if gemini_ready:
+        st.success("✅ Gemini AI 接続済み")
+    else:
+        st.error("❌ APIキー未設定")
+
+# ================================================================
+# メインコンテンツ
+# ================================================================
+st.markdown('<div class="main-title">🍱 AI食事管理アプリ</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Gemini AIが料理を認識！複数料理も一度に分析・記録できます</div>', unsafe_allow_html=True)
+
+tab1, tab2, tab3, tab4 = st.tabs(["🍽 食事を記録", "🏃 運動を記録", "📊 今日のまとめ", "📈 履歴グラフ"])
+
+# ================================================================
+# タブ1：食事を記録
+# ================================================================
+with tab1:
+    st.subheader("料理写真をアップロードして記録")
+    uploaded_file = st.file_uploader("写真を選ぶ", type=["jpg", "jpeg", "png", "webp"])
+
+    if uploaded_file and st.button("🔍 料理を分析して記録", type="primary"):
+        if not gemini_ready:
+            st.error("APIキーが設定されていません")
+        else:
+            image = Image.open(uploaded_file).convert("RGB")
+            col_img, col_result = st.columns([1, 1])
+
+            with col_img:
+                st.image(image, caption="アップロードした写真", use_container_width=True)
+
+            with st.spinner("🤖 Gemini AIが料理を認識中..."):
+                dishes = estimate_calories_gemini(image)
+
+            now_time = datetime.now().strftime("%H:%M")
+            today_str = date.today().strftime("%Y-%m-%d")
+            for d in dishes:
+                st.session_state.meal_log.append({
+                    "date": today_str,
+                    "time": now_time,
+                    "type": "meal",
+                    "name": d["name"],
+                    "calories": d["calories"],
+                    "nutrients": d["nutrients"],
+                })
+
+            with col_result:
+                total_cal = sum(d["calories"] for d in dishes)
+                st.success(f"✅ {len(dishes)}品を認識しました！（合計 {total_cal} kcal）")
+
+                for d in dishes:
+                    nut = d["nutrients"]
+                    st.markdown(f"""
+                    <div class="dish-card">
+                        <div style="display:flex; justify-content:space-between;">
+                            <span style="font-weight:bold; font-size:15px;">{d['name']}</span>
+                            <span style="color:#e94560; font-weight:bold;">{d['calories']} kcal</span>
+                        </div>
+                        <div style="font-size:12px; color:#888; margin-top:4px;">
+                            炭水化物 {nut['carb']}g / タンパク質 {nut['protein']}g / 脂質 {nut['fat']}g
+                        </div>
+                        <div style="font-size:12px; margin-top:4px;">
+                            <span style="background:#2c3e50; padding:2px 8px; border-radius:10px; font-size:10px; color:#a8d8ea;">
+                                確信度 {d['confidence']*100:.0f}%
+                            </span>
+                            <span style="color:#aaa; margin-left:8px;">{d['comment']}</span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+# ================================================================
+# タブ2：運動を記録
+# ================================================================
+with tab2:
+    st.subheader("今日行った運動を記録")
+    exercise_name = st.selectbox("運動を選択", list(EXERCISE_DATABASE.keys()))
+
+    if st.button("🏃 運動を記録", type="primary"):
+        burned = int(EXERCISE_DATABASE[exercise_name] * weight)
+        st.session_state.meal_log.append({
+            "date": date.today().strftime("%Y-%m-%d"),
+            "time": datetime.now().strftime("%H:%M"),
+            "type": "exercise",
+            "name": exercise_name,
+            "calories": burned,
+        })
+        st.success(f"✅ 「{exercise_name}」を記録しました！（消費 {burned} kcal）")
+
+# ================================================================
+# タブ3：今日のまとめ
+# ================================================================
+with tab3:
+    st.subheader(f"📊 今日のまとめ（{date.today().strftime('%Y年%m月%d日')}）")
+
+    today_records = get_today_records()
+    meal_cal = sum(r["calories"] for r in today_records if r["type"] == "meal")
+    exercise_cal = sum(r["calories"] for r in today_records if r["type"] == "exercise")
+    net_cal = meal_cal - exercise_cal
+
+    consumed_nutrients = {"carb": 0, "protein": 0, "fat": 0}
+    for r in today_records:
+        if r["type"] == "meal" and "nutrients" in r:
+            for k in consumed_nutrients:
+                consumed_nutrients[k] += r["nutrients"].get(k, 0)
+
+    ratio = net_cal / required * 100 if required > 0 else 0
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("摂取カロリー", f"+{meal_cal} kcal")
+    with col2:
+        st.metric("運動で消費", f"-{exercise_cal} kcal")
+    with col3:
+        st.metric("実質カロリー", f"{net_cal} / {required} kcal")
+
+    st.progress(min(ratio / 100, 1.0))
+    if ratio < 50:
+        st.warning(f"⚠️ カロリーが不足しています。あと {required - net_cal} kcal 必要です。")
+    elif ratio < 90:
+        st.info(f"✅ もう少しで目標達成！あと {required - net_cal} kcal です。")
+    elif ratio <= 110:
+        st.success("🎉 今日のカロリーは理想的です！")
+    else:
+        st.error(f"⚠️ {net_cal - required} kcal オーバーです。運動で消費しましょう。")
+
+    st.subheader("三大栄養素")
+    nut_col1, nut_col2, nut_col3 = st.columns(3)
+    with nut_col1:
+        carb_ratio = consumed_nutrients["carb"] / ideal["carb"] if ideal["carb"] > 0 else 0
+        st.metric("炭水化物", f"{consumed_nutrients['carb']}g / {ideal['carb']}g")
+        st.progress(min(carb_ratio, 1.0))
+    with nut_col2:
+        pro_ratio = consumed_nutrients["protein"] / ideal["protein"] if ideal["protein"] > 0 else 0
+        st.metric("タンパク質", f"{consumed_nutrients['protein']}g / {ideal['protein']}g")
+        st.progress(min(pro_ratio, 1.0))
+    with nut_col3:
+        fat_ratio = consumed_nutrients["fat"] / ideal["fat"] if ideal["fat"] > 0 else 0
+        st.metric("脂質", f"{consumed_nutrients['fat']}g / {ideal['fat']}g")
+        st.progress(min(fat_ratio, 1.0))
+
+    st.subheader("今日の記録")
+    if today_records:
+        for r in today_records:
+            icon = "🍽" if r["type"] == "meal" else "🏃"
+            sign = "+" if r["type"] == "meal" else "-"
+            st.markdown(f"""
+            <div class="record-item">
+                <span>{icon} {r['name']}（{r['time']}）</span>
+                <span style="color:{'#e94560' if r['type']=='meal' else '#3498db'}; font-weight:bold;">
+                    {sign}{r['calories']} kcal
+                </span>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("まだ記録がありません")
+
+    if st.button("🤖 AIアドバイスを表示", type="primary"):
+        if not gemini_ready:
+            st.error("APIキーが設定されていません")
+        else:
+            with st.spinner("AIがアドバイスを生成中..."):
+                advice = generate_ai_advice(net_cal, required, consumed_nutrients, ideal, today_records)
+            st.markdown(f"""
+            <div class="advice-card">
+                <div style="font-weight:bold; color:#a8d8ea; margin-bottom:8px;">🤖 AIからのアドバイス</div>
+                {advice}
+            </div>
+            """, unsafe_allow_html=True)
+
+# ================================================================
+# タブ4：履歴グラフ
+# ================================================================
+with tab4:
+    st.subheader("📈 カロリー推移")
+
+    log = st.session_state.meal_log
+    if not log:
+        st.info("まだ記録がありません。食事や運動を記録すると、ここにグラフが表示されます。")
+    else:
+        daily = {}
+        for r in log:
+            d = r["date"]
+            if d not in daily:
+                daily[d] = {"meal": 0, "exercise": 0}
+            if r["type"] == "meal":
+                daily[d]["meal"] += r["calories"]
+            else:
+                daily[d]["exercise"] += r["calories"]
+
+        dates = sorted(daily.keys())[-7:]
+
+        chart_data = pd.DataFrame({
+            "日付": ["/".join(d.split("-")[1:]) for d in dates],
+            "摂取カロリー": [daily[d]["meal"] for d in dates],
+            "運動消費": [daily[d]["exercise"] for d in dates],
+            "実質カロリー": [daily[d]["meal"] - daily[d]["exercise"] for d in dates],
+        })
+        chart_data = chart_data.set_index("日付")
+
+        st.bar_chart(chart_data[["摂取カロリー", "運動消費"]])
+        st.line_chart(chart_data[["実質カロリー"]])
+        st.caption(f"目標カロリー: {required} kcal / 日")
+
+    st.divider()
+    if st.button("🗑 記録を全削除", type="secondary"):
+        st.session_state.meal_log = []
+        st.success("すべての記録を削除しました")
+        st.rerun()
