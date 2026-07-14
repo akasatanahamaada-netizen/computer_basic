@@ -22,52 +22,224 @@ st.set_page_config(
 )
 
 # ================================================================
-# カスタムCSS
+# カスタムCSS（ポップ＆カラフルデザイン）
 # ================================================================
 st.markdown("""
+<link href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@400;500;700;800&display=swap" rel="stylesheet">
 <style>
+    :root {
+        --coral: #FF6B6B;
+        --coral-dark: #E8534F;
+        --turquoise: #3DCCC7;
+        --turquoise-dark: #29ABA6;
+        --sunny: #FFC93C;
+        --sunny-dark: #E8AC10;
+        --purple: #9B7EDE;
+        --purple-dark: #7C5BC4;
+        --green: #6BCB77;
+        --green-dark: #4EA85C;
+        --cream: #FFF7ED;
+        --ink: #2D2A32;
+    }
+
+    html, body, [class*="css"] {
+        font-family: 'M PLUS Rounded 1c', sans-serif !important;
+    }
+
+    .stApp {
+        background: var(--cream);
+    }
+
+    /* ---------- タイトル ---------- */
     .main-title {
         text-align: center;
-        color: #a8d8ea;
-        font-size: 2rem;
-        font-weight: bold;
-        margin-bottom: 0.5rem;
+        color: var(--ink);
+        font-size: 2.4rem;
+        font-weight: 800;
+        margin-bottom: 0.3rem;
+        letter-spacing: 0.02em;
+    }
+    .main-title .accent {
+        background: linear-gradient(90deg, var(--coral), var(--sunny) 50%, var(--turquoise));
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
     }
     .sub-title {
         text-align: center;
-        color: #888;
-        font-size: 0.9rem;
-        margin-bottom: 2rem;
+        color: #8A8494;
+        font-size: 1rem;
+        font-weight: 500;
+        margin-bottom: 1.8rem;
+    }
+
+    /* ---------- ポップカード共通 ---------- */
+    .pop-card {
+        border-radius: 22px;
+        padding: 16px 18px;
+        margin-bottom: 12px;
+        border: 3px solid var(--ink);
+        box-shadow: 5px 5px 0px rgba(45,42,50,0.15);
+        color: var(--ink);
     }
     .dish-card {
-        background: #1f2b47;
-        padding: 12px 16px;
-        border-radius: 8px;
-        margin-bottom: 8px;
-        color: white;
+        background: #FFFFFF;
+        border-radius: 22px;
+        padding: 14px 18px;
+        margin-bottom: 10px;
+        border: 3px solid var(--coral);
+        box-shadow: 4px 4px 0px var(--coral);
+        color: var(--ink);
     }
     .advice-card {
-        background: #16213e;
-        padding: 16px;
-        border-radius: 12px;
-        color: #ccc;
+        background: #FFFFFF;
+        border-radius: 22px;
+        padding: 18px 20px;
         margin-top: 16px;
+        border: 3px solid var(--purple);
+        box-shadow: 4px 4px 0px var(--purple);
+        color: var(--ink);
         line-height: 1.8;
     }
     .record-item {
         display: flex;
         justify-content: space-between;
-        padding: 8px 12px;
-        background: #1f2b47;
-        border-radius: 8px;
-        margin-bottom: 6px;
-        color: #ccc;
+        align-items: center;
+        padding: 10px 16px;
+        background: #FFFFFF;
+        border-radius: 999px;
+        margin-bottom: 8px;
+        border: 2.5px solid #EFE6DA;
+        color: var(--ink);
+        font-weight: 500;
+    }
+
+    /* ---------- 見出しバッジ ---------- */
+    .badge {
+        display: inline-block;
+        padding: 3px 12px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+        color: white;
+    }
+
+    /* ---------- サイドバー ---------- */
+    section[data-testid="stSidebar"] {
+        background: #FFFFFF;
+        border-right: 3px dashed #EFE6DA;
+    }
+    section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {
+        font-weight: 800 !important;
+        color: var(--ink) !important;
+    }
+
+    /* ---------- ボタン（ピル型・ポップ） ---------- */
+    .stButton > button {
+        border-radius: 999px !important;
+        font-weight: 700 !important;
+        border: 3px solid var(--ink) !important;
+        padding: 0.5em 1.4em !important;
+        box-shadow: 3px 3px 0px rgba(45,42,50,0.25) !important;
+        transition: all 0.12s ease !important;
+        background: var(--sunny) !important;
+        color: var(--ink) !important;
+    }
+    .stButton > button:hover {
+        transform: translate(-2px, -2px) !important;
+        box-shadow: 5px 5px 0px rgba(45,42,50,0.3) !important;
+        background: var(--sunny) !important;
+    }
+    .stButton > button:active {
+        transform: translate(1px, 1px) !important;
+        box-shadow: 1px 1px 0px rgba(45,42,50,0.3) !important;
+    }
+    .stButton > button[kind="primary"] {
+        background: var(--coral) !important;
+        color: white !important;
+    }
+    .stButton > button[kind="secondary"] {
+        background: #FFFFFF !important;
+        color: var(--coral-dark) !important;
+        border-color: var(--coral) !important;
     }
     div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button {
-        padding: 2px 10px;
-        font-size: 12px;
-        min-height: 28px;
+        padding: 0.25em 1em !important;
+        font-size: 12px !important;
+        min-height: 30px !important;
+        background: #FFFFFF !important;
+        color: var(--coral-dark) !important;
+        border-color: var(--coral) !important;
+        box-shadow: 2px 2px 0px rgba(45,42,50,0.2) !important;
     }
+
+    /* ---------- タブ ---------- */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        background: transparent;
+    }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 999px !important;
+        background: #FFFFFF !important;
+        border: 2.5px solid #EFE6DA !important;
+        padding: 8px 20px !important;
+        font-weight: 700 !important;
+        color: #8A8494 !important;
+    }
+    .stTabs [aria-selected="true"] {
+        background: var(--turquoise) !important;
+        border-color: var(--turquoise-dark) !important;
+        color: white !important;
+        box-shadow: 3px 3px 0px var(--turquoise-dark) !important;
+    }
+    .stTabs [data-baseweb="tab-highlight"] { display: none; }
+    .stTabs [data-baseweb="tab-border"] { display: none; }
+
+    /* ---------- ファイルアップローダー / セレクト / 入力 ---------- */
+    section[data-testid="stFileUploaderDropzone"] {
+        border-radius: 22px !important;
+        border: 3px dashed var(--turquoise) !important;
+        background: #FFFFFF !important;
+    }
+    .stSelectbox div[data-baseweb="select"] > div,
+    .stNumberInput input, .stTextInput input {
+        border-radius: 16px !important;
+        border: 2.5px solid #EFE6DA !important;
+    }
+    div[role="radiogroup"] label {
+        font-weight: 500 !important;
+    }
+
+    /* ---------- メトリクス ---------- */
+    div[data-testid="stMetric"] {
+        background: #FFFFFF;
+        border-radius: 20px;
+        padding: 14px 16px 10px 16px;
+        border: 2.5px solid #EFE6DA;
+    }
+    div[data-testid="stMetricValue"] {
+        color: var(--ink) !important;
+        font-weight: 800 !important;
+    }
+
+    /* ---------- プログレスバー ---------- */
+    div[data-testid="stProgress"] > div > div {
+        background: linear-gradient(90deg, var(--coral), var(--sunny)) !important;
+        border-radius: 999px !important;
+    }
+    div[data-testid="stProgress"] > div {
+        background: #F1E9DC !important;
+        border-radius: 999px !important;
+    }
+
+    /* ---------- アラート系 ---------- */
+    div[data-testid="stAlert"] {
+        border-radius: 18px !important;
+        border: 2.5px solid transparent !important;
+        font-weight: 500 !important;
+    }
+
+    hr { border-top: 3px dashed #EFE6DA !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -251,10 +423,10 @@ with st.sidebar:
 # ================================================================
 # メインコンテンツ
 # ================================================================
-st.markdown('<div class="main-title">🍱 AI食事管理アプリ</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Gemini AIが料理を認識！複数料理も一度に分析・記録できます</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🍱 <span class="accent">AI食事管理アプリ</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Gemini AIが料理をパシャッと認識！記録も分析もぜんぶおまかせ ✨</div>', unsafe_allow_html=True)
 
-tab1, tab2, tab3, tab4 = st.tabs(["🍽 食事を記録", "🏃 運動を記録", "📊 今日のまとめ", "📈 履歴グラフ"])
+tab1, tab2, tab3, tab4 = st.tabs(["🍽️ 食事を記録", "🏃 運動を記録", "📊 今日のまとめ", "📈 履歴グラフ"])
 
 # ================================================================
 # タブ1：食事を記録
@@ -297,18 +469,18 @@ with tab1:
                     nut = d["nutrients"]
                     st.markdown(f"""
                     <div class="dish-card">
-                        <div style="display:flex; justify-content:space-between;">
-                            <span style="font-weight:bold; font-size:15px;">{d['name']}</span>
-                            <span style="color:#e94560; font-weight:bold;">{d['calories']} kcal</span>
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <span style="font-weight:800; font-size:16px;">🍴 {d['name']}</span>
+                            <span class="badge" style="background:var(--coral);">{d['calories']} kcal</span>
                         </div>
-                        <div style="font-size:12px; color:#888; margin-top:4px;">
-                            炭水化物 {nut['carb']}g / タンパク質 {nut['protein']}g / 脂質 {nut['fat']}g
+                        <div style="font-size:12px; color:#8A8494; margin-top:6px; font-weight:500;">
+                            炭水化物 {nut['carb']}g・タンパク質 {nut['protein']}g・脂質 {nut['fat']}g
                         </div>
-                        <div style="font-size:12px; margin-top:4px;">
-                            <span style="background:#2c3e50; padding:2px 8px; border-radius:10px; font-size:10px; color:#a8d8ea;">
+                        <div style="display:flex; align-items:center; gap:8px; margin-top:8px;">
+                            <span class="badge" style="background:var(--turquoise);">
                                 確信度 {d['confidence']*100:.0f}%
                             </span>
-                            <span style="color:#aaa; margin-left:8px;">{d['comment']}</span>
+                            <span style="color:#8A8494; font-size:12px; font-weight:500;">{d['comment']}</span>
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
@@ -392,10 +564,11 @@ with tab3:
             color = "#e94560" if r["type"] == "meal" else "#3498db"
             row_col1, row_col2 = st.columns([6, 1])
             with row_col1:
+                color = "var(--coral-dark)" if r["type"] == "meal" else "var(--turquoise-dark)"
                 st.markdown(f"""
                 <div class="record-item">
                     <span>{icon} {r['name']}（{r['time']}）</span>
-                    <span style="color:{color}; font-weight:bold;">
+                    <span style="color:{color}; font-weight:800;">
                         {sign}{r['calories']} kcal
                     </span>
                 </div>
@@ -417,7 +590,7 @@ with tab3:
                 advice = generate_ai_advice(net_cal, required, consumed_nutrients, ideal, today_records)
             st.markdown(f"""
             <div class="advice-card">
-                <div style="font-weight:bold; color:#a8d8ea; margin-bottom:8px;">🤖 AIからのアドバイス</div>
+                <div style="font-weight:800; color:var(--purple-dark); margin-bottom:8px; font-size:15px;">🤖 AIからのアドバイス</div>
                 {advice}
             </div>
             """, unsafe_allow_html=True)
@@ -453,12 +626,12 @@ with tab4:
 
     bar_chart = (
         alt.Chart(bar_df)
-        .mark_bar()
+        .mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8)
         .encode(
             x=alt.X("日付:N", sort=None, title=None),
             xOffset="種類:N",
             y=alt.Y("kcal:Q", scale=alt.Scale(domain=[0, max(1, bar_df['kcal'].max() * 1.15)]), title="kcal"),
-            color=alt.Color("種類:N", scale=alt.Scale(range=["#e94560", "#3498db"]), legend=alt.Legend(title=None, orient="top")),
+            color=alt.Color("種類:N", scale=alt.Scale(range=["#FF6B6B", "#3DCCC7"]), legend=alt.Legend(title=None, orient="top")),
             tooltip=["日付", "種類", "kcal"],
         )
         .properties(height=300)
@@ -473,7 +646,7 @@ with tab4:
 
     line_chart = (
         alt.Chart(net_df)
-        .mark_line(point=True, color="#27ae60")
+        .mark_line(point=alt.OverlayMarkDef(size=90, filled=True, color="#9B7EDE"), color="#9B7EDE", strokeWidth=3)
         .encode(
             x=alt.X("日付:N", sort=None, title=None),
             y=alt.Y("実質カロリー:Q", scale=alt.Scale(domain=[0, net_max])),
@@ -483,11 +656,11 @@ with tab4:
     )
     goal_line = (
         alt.Chart(pd.DataFrame({"目標": [required]}))
-        .mark_rule(color="#f39c12", strokeDash=[6, 4])
+        .mark_rule(color="#FFC93C", strokeDash=[6, 4], strokeWidth=2.5)
         .encode(y="目標:Q")
     )
     st.altair_chart(line_chart + goal_line, use_container_width=True)
-    st.caption(f"点線は目標カロリー（{required} kcal / 日）を示しています。棒グラフ・折れ線グラフともに0kcalから表示しています。")
+    st.caption(f"🟡 点線は目標カロリー（{required} kcal / 日）を示しています。棒グラフ・折れ線グラフともに0kcalから表示しています。")
 
     st.divider()
     if st.button("🗑 記録を全削除", type="secondary"):
