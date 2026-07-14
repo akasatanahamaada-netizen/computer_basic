@@ -270,22 +270,40 @@ except Exception:
 localS = LocalStorage()
 STORAGE_KEY = "mogureco_meal_log_v1"
 
+# ================================================================
+# セッション状態の初期化（ブラウザのローカルストレージから復元）
+# ================================================================
+localS = LocalStorage()
+STORAGE_KEY = "mogureco_meal_log_v1"
+
 if "meal_log" not in st.session_state:
     st.session_state.meal_log = []
+if "_ls_loaded" not in st.session_state:
+    st.session_state._ls_loaded = False
+if "_ls_load_attempts" not in st.session_state:
+    st.session_state._ls_load_attempts = 0
 
-if not st.session_state.get("_ls_loaded"):
+# JSの読み込みは非同期のため、初回は None が返ることがある。
+# データが取れるか・試行上限に達するまで、リロードのたびに再挑戦する。
+if not st.session_state._ls_loaded and st.session_state._ls_load_attempts < 5:
     try:
         stored_raw = localS.getItem(STORAGE_KEY, key="ls_get_meal_log")
     except Exception:
         stored_raw = None
+
+    st.session_state._ls_load_attempts += 1
+
     if stored_raw:
         try:
             loaded = json.loads(stored_raw) if isinstance(stored_raw, str) else stored_raw
             if isinstance(loaded, list):
                 st.session_state.meal_log = loaded
+                st.session_state._ls_loaded = True
         except Exception:
             pass
-    st.session_state._ls_loaded = True
+    elif st.session_state._ls_load_attempts >= 5:
+        # 5回試して空なら「本当に記録がない」と判断して確定する
+        st.session_state._ls_loaded = True
 
 def persist_log():
     """記録をブラウザのローカルストレージに保存する（次回アクセス時も残る）"""
@@ -295,8 +313,11 @@ def persist_log():
             json.dumps(st.session_state.meal_log, ensure_ascii=False),
             key="ls_set_meal_log",
         )
-    except Exception:
-        pass
+        st.session_state._ls_loaded = True
+        return True
+    except Exception as e:
+        st.session_state._ls_save_error = str(e)
+        return False
 
 # ================================================================
 # 運動データベース
@@ -461,6 +482,17 @@ with st.sidebar:
         st.success("✅ AIが使える状態です")
     else:
         st.error("❌ APIキー未設定")
+
+    with st.expander("💾 保存状態（デバッグ用）", expanded=False):
+        st.caption(f"読み込み完了: {st.session_state._ls_loaded}")
+        st.caption(f"読み込み試行回数: {st.session_state._ls_load_attempts}")
+        st.caption(f"現在の記録件数: {len(st.session_state.meal_log)}")
+        if st.session_state.get("_ls_save_error"):
+            st.caption(f"⚠️ 保存エラー: {st.session_state._ls_save_error}")
+        if st.button("🔄 ローカルストレージから再読み込み"):
+            st.session_state._ls_loaded = False
+            st.session_state._ls_load_attempts = 0
+            st.rerun()
 
 # ================================================================
 # メインコンテンツ
