@@ -16,8 +16,8 @@ warnings.filterwarnings("ignore")
 # ページ設定
 # ================================================================
 st.set_page_config(
-    page_title="🍱 もぐレコ",
-    page_icon="🍱",
+    page_title="🥣 もぐレコ",
+    page_icon="🥣",
     layout="wide",
 )
 
@@ -50,20 +50,27 @@ st.markdown("""
         background: var(--cream);
     }
 
-    /* ---------- タイトル ---------- */
+    /* ---------- タイトル（丸文字＋縁取り） ---------- */
     .main-title {
         text-align: center;
-        color: var(--ink);
-        font-size: 2.4rem;
-        font-weight: 800;
         margin-bottom: 0.3rem;
-        letter-spacing: 0.02em;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+    }
+    .main-title .logo-icon {
+        width: 44px;
+        height: 44px;
+        flex-shrink: 0;
     }
     .main-title .accent {
-        background: linear-gradient(90deg, var(--coral), var(--sunny) 50%, var(--turquoise));
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
+        font-size: 2.6rem;
+        font-weight: 800;
+        letter-spacing: 0.03em;
+        color: var(--sunny);
+        -webkit-text-stroke: 2.5px var(--ink);
+        paint-order: stroke fill;
     }
     .sub-title {
         text-align: center;
@@ -427,7 +434,18 @@ with st.sidebar:
 # ================================================================
 # メインコンテンツ
 # ================================================================
-st.markdown('<div class="main-title">🍱 <span class="accent">もぐレコ</span></div>', unsafe_allow_html=True)
+st.markdown("""
+<div class="main-title">
+    <svg class="logo-icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M8 22C8 22 8 34 24 34C40 34 40 22 40 22" stroke="#2D2A32" stroke-width="3" stroke-linecap="round"/>
+        <path d="M6 22H42" stroke="#2D2A32" stroke-width="3" stroke-linecap="round"/>
+        <path d="M8 22C8 14 15 9 24 9C33 9 40 14 40 22" fill="#FF6B6B" stroke="#2D2A32" stroke-width="3" stroke-linejoin="round"/>
+        <path d="M20 5C19 6.5 19 8 20.5 9" stroke="#2D2A32" stroke-width="2.5" stroke-linecap="round"/>
+        <path d="M27 4C26 5.8 26 7.5 27.7 9" stroke="#2D2A32" stroke-width="2.5" stroke-linecap="round"/>
+    </svg>
+    <span class="accent">もぐレコ</span>
+</div>
+""", unsafe_allow_html=True)
 st.markdown('<div class="sub-title">もぐもぐレコード｜AIが料理をパシャッと認識！記録も分析もぜんぶおまかせ ✨</div>', unsafe_allow_html=True)
 
 tab1, tab2, tab3, tab4 = st.tabs(["🍽️ 食事を記録", "🏃 運動を記録", "📊 今日のまとめ", "📈 履歴グラフ"])
