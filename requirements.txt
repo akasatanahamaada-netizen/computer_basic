@@ -3,4 +3,4 @@ google-generativeai
 Pillow
 pandas
 altair
-streamlit-local-storage
+requests

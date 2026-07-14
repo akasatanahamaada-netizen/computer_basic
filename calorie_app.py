@@ -1,6 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
-from streamlit_local_storage import LocalStorage
+import requests
 from PIL import Image
 import json
 import re
@@ -265,59 +265,48 @@ except Exception:
     st.error("APIキーが設定されていません。Streamlit Cloudの Settings → Secrets に GEMINI_API_KEY を設定してください。")
 
 # ================================================================
-# セッション状態の初期化（ブラウザのローカルストレージから復元）
+# セッション状態の初期化（Firebase Realtime Database から復元）
 # ================================================================
-localS = LocalStorage()
-STORAGE_KEY = "mogureco_meal_log_v1"
+FIREBASE_URL = st.secrets.get("FIREBASE_DB_URL", "").rstrip("/")
 
-# ================================================================
-# セッション状態の初期化（ブラウザのローカルストレージから復元）
-# ================================================================
-localS = LocalStorage()
-STORAGE_KEY = "mogureco_meal_log_v1"
-
-if "meal_log" not in st.session_state:
-    st.session_state.meal_log = []
-if "_ls_loaded" not in st.session_state:
-    st.session_state._ls_loaded = False
-if "_ls_load_attempts" not in st.session_state:
-    st.session_state._ls_load_attempts = 0
-
-# JSの読み込みは非同期のため、初回は None が返ることがある。
-# データが取れるか・試行上限に達するまで、リロードのたびに再挑戦する。
-if not st.session_state._ls_loaded and st.session_state._ls_load_attempts < 5:
+def load_meal_log_from_firebase():
+    """Firebaseから記録を取得する"""
+    if not FIREBASE_URL:
+        return []
     try:
-        stored_raw = localS.getItem(STORAGE_KEY, key="ls_get_meal_log")
-    except Exception:
-        stored_raw = None
-
-    st.session_state._ls_load_attempts += 1
-
-    if stored_raw:
-        try:
-            loaded = json.loads(stored_raw) if isinstance(stored_raw, str) else stored_raw
-            if isinstance(loaded, list):
-                st.session_state.meal_log = loaded
-                st.session_state._ls_loaded = True
-        except Exception:
-            pass
-    elif st.session_state._ls_load_attempts >= 5:
-        # 5回試して空なら「本当に記録がない」と判断して確定する
-        st.session_state._ls_loaded = True
+        resp = requests.get(f"{FIREBASE_URL}/meal_log.json", timeout=6)
+        data = resp.json()
+        if isinstance(data, list):
+            return [d for d in data if d]
+        if isinstance(data, dict):
+            return list(data.values())
+        return []
+    except Exception as e:
+        st.session_state["_fb_load_error"] = str(e)
+        return []
 
 def persist_log():
-    """記録をブラウザのローカルストレージに保存する（次回アクセス時も残る）"""
-    try:
-        localS.setItem(
-            STORAGE_KEY,
-            json.dumps(st.session_state.meal_log, ensure_ascii=False),
-            key="ls_set_meal_log",
-        )
-        st.session_state._ls_loaded = True
-        return True
-    except Exception as e:
-        st.session_state._ls_save_error = str(e)
+    """記録をFirebaseに保存する（次回アクセス時・別端末でも残る）"""
+    if not FIREBASE_URL:
+        st.session_state["_fb_save_error"] = "FIREBASE_DB_URL が設定されていません"
         return False
+    try:
+        resp = requests.put(
+            f"{FIREBASE_URL}/meal_log.json",
+            json=st.session_state.meal_log,
+            timeout=6,
+        )
+        if resp.status_code == 200:
+            st.session_state["_fb_save_error"] = None
+            return True
+        st.session_state["_fb_save_error"] = f"HTTP {resp.status_code}: {resp.text[:200]}"
+        return False
+    except Exception as e:
+        st.session_state["_fb_save_error"] = str(e)
+        return False
+
+if "meal_log" not in st.session_state:
+    st.session_state.meal_log = load_meal_log_from_firebase()
 
 # ================================================================
 # 運動データベース
@@ -483,15 +472,19 @@ with st.sidebar:
     else:
         st.error("❌ APIキー未設定")
 
+    if FIREBASE_URL:
+        st.success("✅ データベースに接続済み")
+    else:
+        st.error("❌ FIREBASE_DB_URL 未設定")
+
     with st.expander("💾 保存状態（デバッグ用）", expanded=False):
-        st.caption(f"読み込み完了: {st.session_state._ls_loaded}")
-        st.caption(f"読み込み試行回数: {st.session_state._ls_load_attempts}")
         st.caption(f"現在の記録件数: {len(st.session_state.meal_log)}")
-        if st.session_state.get("_ls_save_error"):
-            st.caption(f"⚠️ 保存エラー: {st.session_state._ls_save_error}")
-        if st.button("🔄 ローカルストレージから再読み込み"):
-            st.session_state._ls_loaded = False
-            st.session_state._ls_load_attempts = 0
+        if st.session_state.get("_fb_save_error"):
+            st.caption(f"⚠️ 保存エラー: {st.session_state._fb_save_error}")
+        if st.session_state.get("_fb_load_error"):
+            st.caption(f"⚠️ 読み込みエラー: {st.session_state._fb_load_error}")
+        if st.button("🔄 データベースから再読み込み"):
+            st.session_state.meal_log = load_meal_log_from_firebase()
             st.rerun()
 
 # ================================================================
