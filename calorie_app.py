@@ -16,7 +16,7 @@ warnings.filterwarnings("ignore")
 # ページ設定
 # ================================================================
 st.set_page_config(
-    page_title="🍱 AI食事管理アプリ",
+    page_title="🍱 もぐレコ",
     page_icon="🍱",
     layout="wide",
 )
@@ -224,11 +224,12 @@ st.markdown("""
 
     /* ---------- プログレスバー ---------- */
     div[data-testid="stProgress"] > div > div {
-        background: linear-gradient(90deg, var(--coral), var(--sunny)) !important;
+        background: var(--coral) !important;
         border-radius: 999px !important;
     }
     div[data-testid="stProgress"] > div {
-        background: #F1E9DC !important;
+        background: #CDEFEF !important;
+        border: 2px solid var(--turquoise) !important;
         border-radius: 999px !important;
     }
 
@@ -426,8 +427,8 @@ with st.sidebar:
 # ================================================================
 # メインコンテンツ
 # ================================================================
-st.markdown('<div class="main-title">🍱 <span class="accent">AI食事管理アプリ</span></div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Gemini AIが料理をパシャッと認識！記録も分析もぜんぶおまかせ ✨</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🍱 <span class="accent">もぐレコ</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">もぐもぐレコード｜AIが料理をパシャッと認識！記録も分析もぜんぶおまかせ ✨</div>', unsafe_allow_html=True)
 
 tab1, tab2, tab3, tab4 = st.tabs(["🍽️ 食事を記録", "🏃 運動を記録", "📊 今日のまとめ", "📈 履歴グラフ"])
 
@@ -585,7 +586,8 @@ with tab3:
     with col3:
         st.metric("実質カロリー", f"{net_cal} / {required} kcal")
 
-    st.progress(min(ratio / 100, 1.0))
+    st.progress(max(0.0, min(ratio / 100, 1.0)))
+    st.caption("🔴 摂取した分　🔵 まだ足りない分")
     if ratio < 50:
         st.warning(f"⚠️ カロリーが不足しています。あと {required - net_cal} kcal 必要です。")
     elif ratio < 90:
@@ -600,15 +602,15 @@ with tab3:
     with nut_col1:
         carb_ratio = consumed_nutrients["carb"] / ideal["carb"] if ideal["carb"] > 0 else 0
         st.metric("炭水化物", f"{consumed_nutrients['carb']}g / {ideal['carb']}g")
-        st.progress(min(carb_ratio, 1.0))
+        st.progress(max(0.0, min(carb_ratio, 1.0)))
     with nut_col2:
         pro_ratio = consumed_nutrients["protein"] / ideal["protein"] if ideal["protein"] > 0 else 0
         st.metric("タンパク質", f"{consumed_nutrients['protein']}g / {ideal['protein']}g")
-        st.progress(min(pro_ratio, 1.0))
+        st.progress(max(0.0, min(pro_ratio, 1.0)))
     with nut_col3:
         fat_ratio = consumed_nutrients["fat"] / ideal["fat"] if ideal["fat"] > 0 else 0
         st.metric("脂質", f"{consumed_nutrients['fat']}g / {ideal['fat']}g")
-        st.progress(min(fat_ratio, 1.0))
+        st.progress(max(0.0, min(fat_ratio, 1.0)))
 
     st.subheader("今日の記録")
     if today_records:
