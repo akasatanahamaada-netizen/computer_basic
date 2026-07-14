@@ -1,5 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
+from streamlit_local_storage import LocalStorage
 from PIL import Image
 import json
 import re
@@ -264,10 +265,38 @@ except Exception:
     st.error("APIキーが設定されていません。Streamlit Cloudの Settings → Secrets に GEMINI_API_KEY を設定してください。")
 
 # ================================================================
-# セッション状態の初期化
+# セッション状態の初期化（ブラウザのローカルストレージから復元）
 # ================================================================
+localS = LocalStorage()
+STORAGE_KEY = "mogureco_meal_log_v1"
+
 if "meal_log" not in st.session_state:
     st.session_state.meal_log = []
+
+if not st.session_state.get("_ls_loaded"):
+    try:
+        stored_raw = localS.getItem(STORAGE_KEY, key="ls_get_meal_log")
+    except Exception:
+        stored_raw = None
+    if stored_raw:
+        try:
+            loaded = json.loads(stored_raw) if isinstance(stored_raw, str) else stored_raw
+            if isinstance(loaded, list):
+                st.session_state.meal_log = loaded
+        except Exception:
+            pass
+    st.session_state._ls_loaded = True
+
+def persist_log():
+    """記録をブラウザのローカルストレージに保存する（次回アクセス時も残る）"""
+    try:
+        localS.setItem(
+            STORAGE_KEY,
+            json.dumps(st.session_state.meal_log, ensure_ascii=False),
+            key="ls_set_meal_log",
+        )
+    except Exception:
+        pass
 
 # ================================================================
 # 運動データベース
@@ -482,6 +511,7 @@ with tab1:
                         "nutrients": info["nutrients"],
                     })
                     st.toast(f"「{name}」を記録しました", icon="✅")
+                    persist_log()
                     st.rerun()
         st.divider()
 
@@ -513,6 +543,7 @@ with tab1:
                     "calories": d["calories"],
                     "nutrients": d["nutrients"],
                 })
+            persist_log()
 
             with col_result:
                 total_cal = sum(d["calories"] for d in dishes)
@@ -555,6 +586,7 @@ with tab2:
             "calories": burned,
         })
         st.toast(f"「{name}」を記録しました（消費 {burned} kcal）", icon="✅")
+        persist_log()
 
     # ---- よく使う運動（再認記憶：選び直さず一目で選べる） ----
     exercise_counts = {}
@@ -654,6 +686,7 @@ with tab3:
                     st.session_state.meal_log = [
                         m for m in st.session_state.meal_log if m["id"] != r["id"]
                     ]
+                    persist_log()
                     st.rerun()
     else:
         st.info("📸 まずは「食事を記録」タブから、今日食べたものを撮ってみましょう")
@@ -741,5 +774,6 @@ with tab4:
     st.divider()
     if st.button("🗑 記録を全削除", type="secondary"):
         st.session_state.meal_log = []
+        persist_log()
         st.success("すべての記録を削除しました")
         st.rerun()
