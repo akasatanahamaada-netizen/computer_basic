@@ -381,8 +381,7 @@ def estimate_calories_gemini(image):
     "carb": 炭水化物グラム数（数値のみ）,
     "protein": タンパク質グラム数（数値のみ）,
     "fat": 脂質グラム数（数値のみ）,
-    "confidence": 確信度0.0〜1.0,
-    "comment": "この料理についての栄養アドバイス（30文字以内）"
+    "confidence": 確信度0.0〜1.0
   }
 ]}
 
@@ -405,7 +404,6 @@ def estimate_calories_gemini(image):
                     "fat": int(d.get("fat", 0)),
                 },
                 "confidence": float(d.get("confidence", 0.5)),
-                "comment": d.get("comment", ""),
             })
         if not dishes:
             raise ValueError("認識できませんでした")
@@ -417,25 +415,48 @@ def estimate_calories_gemini(image):
             "calories": 0,
             "nutrients": {"carb": 0, "protein": 0, "fat": 0},
             "confidence": 0,
-            "comment": "別の角度から撮影してみてください",
         }]
+
+NUTRIENT_LABELS = {"carb": "糖質（炭水化物）", "protein": "タンパク質", "fat": "脂質"}
+NUTRIENT_COLORS = {"carb": "#f39c12", "protein": "#e94560", "fat": "#3498db"}
+
+def nutrient_status(consumed, ideal):
+    """栄養素の充足率から状態を判定する（不足 / ちょうど良い / 摂りすぎ）"""
+    ratio = consumed / ideal * 100 if ideal > 0 else 0
+    if ratio < 70:
+        return "不足", "#e74c3c", ratio
+    elif ratio <= 130:
+        return "ちょうど良い", "#27ae60", ratio
+    else:
+        return "摂りすぎ", "#e67e22", ratio
 
 def generate_ai_advice(consumed, required, consumed_nutrients, ideal_nutrients, today_records):
     meals = [r["name"] for r in today_records if r["type"] == "meal"]
     exercises = [r["name"] for r in today_records if r["type"] == "exercise"]
     remaining = required - consumed
 
-    prompt = f"""あなたは栄養管理の専門家です。以下の情報をもとに、100文字程度で食事アドバイスを日本語で書いてください。
+    # 各栄養素の過不足を先に計算し、AIには「何が足りないか」を明示して渡す
+    status_lines = []
+    for key in ["carb", "protein", "fat"]:
+        status, _, ratio = nutrient_status(consumed_nutrients[key], ideal_nutrients[key])
+        diff = ideal_nutrients[key] - consumed_nutrients[key]
+        status_lines.append(
+            f"{NUTRIENT_LABELS[key]}: {consumed_nutrients[key]}g / 目安{ideal_nutrients[key]}g "
+            f"（{status}、{'あと'+str(diff)+'g足りない' if diff > 0 else str(-diff)+'g多い' if diff < 0 else '適量'}）"
+        )
+
+    prompt = f"""あなたは栄養管理の専門家です。今日1日全体の食事内容を振り返り、120文字程度で日本語のアドバイスを書いてください。
+1品ごとの感想ではなく、「今日全体として何が足りず、何が多いか」を明確にし、それを補う具体的な食材名を1〜2個挙げてください。
 
 1日の必要カロリー: {required} kcal
 現在の摂取カロリー: {consumed} kcal（残り {remaining} kcal）
 今日食べたもの: {', '.join(meals) if meals else 'まだなし'}
 今日の運動: {', '.join(exercises) if exercises else 'なし'}
-炭水化物: {consumed_nutrients['carb']}g / 理想 {ideal_nutrients['carb']}g
-タンパク質: {consumed_nutrients['protein']}g / 理想 {ideal_nutrients['protein']}g
-脂質: {consumed_nutrients['fat']}g / 理想 {ideal_nutrients['fat']}g
 
-具体的な食材名を挙げて、次に何を食べるべきかアドバイスしてください。"""
+栄養素の状況:
+{chr(10).join(status_lines)}
+
+「不足しているもの」「摂りすぎているもの」がある場合はそれを最初に触れ、なければバランスが良いことを褒めてください。"""
 
     try:
         model = genai.GenerativeModel("models/gemini-2.5-flash-lite")
@@ -583,16 +604,16 @@ with tab1:
                             <span class="badge" style="background:var(--coral);">{d['calories']} kcal</span>
                         </div>
                         <div style="font-size:12px; color:#8A8494; margin-top:6px; font-weight:500;">
-                            炭水化物 {nut['carb']}g・タンパク質 {nut['protein']}g・脂質 {nut['fat']}g
+                            糖質 {nut['carb']}g・タンパク質 {nut['protein']}g・脂質 {nut['fat']}g
                         </div>
                         <div style="display:flex; align-items:center; gap:8px; margin-top:8px;">
                             <span class="badge" style="background:var(--turquoise);">
                                 確信度 {d['confidence']*100:.0f}%
                             </span>
-                            <span style="color:#8A8494; font-size:12px; font-weight:500;">{d['comment']}</span>
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
+                st.caption("💡 1日の栄養バランスは「今日のまとめ」タブでまとめて確認できます")
 
 # ================================================================
 # タブ2：運動を記録
@@ -674,20 +695,18 @@ with tab3:
     else:
         st.error(f"⚠️ {net_cal - required} kcal オーバーです。運動で消費しましょう。")
 
-    st.subheader("三大栄養素")
+    st.subheader("糖質・タンパク質・脂質のバランス")
     nut_col1, nut_col2, nut_col3 = st.columns(3)
-    with nut_col1:
-        carb_ratio = consumed_nutrients["carb"] / ideal["carb"] if ideal["carb"] > 0 else 0
-        st.metric("炭水化物", f"{consumed_nutrients['carb']}g / {ideal['carb']}g")
-        pop_bar(carb_ratio, height=14)
-    with nut_col2:
-        pro_ratio = consumed_nutrients["protein"] / ideal["protein"] if ideal["protein"] > 0 else 0
-        st.metric("タンパク質", f"{consumed_nutrients['protein']}g / {ideal['protein']}g")
-        pop_bar(pro_ratio, height=14)
-    with nut_col3:
-        fat_ratio = consumed_nutrients["fat"] / ideal["fat"] if ideal["fat"] > 0 else 0
-        st.metric("脂質", f"{consumed_nutrients['fat']}g / {ideal['fat']}g")
-        pop_bar(fat_ratio, height=14)
+    nutrient_cols = {"carb": nut_col1, "protein": nut_col2, "fat": nut_col3}
+    for key, col in nutrient_cols.items():
+        with col:
+            status, color, nratio = nutrient_status(consumed_nutrients[key], ideal[key])
+            st.metric(NUTRIENT_LABELS[key], f"{consumed_nutrients[key]}g / {ideal[key]}g")
+            pop_bar(nratio / 100, height=14)
+            st.markdown(
+                f"<span class='badge' style='background:{color};'>{status}</span>",
+                unsafe_allow_html=True,
+            )
 
     st.subheader("今日の記録")
     if today_records:
@@ -716,15 +735,15 @@ with tab3:
     else:
         st.info("📸 まずは「食事を記録」タブから、今日食べたものを撮ってみましょう")
 
-    if st.button("🤖 AIアドバイスを表示", type="primary"):
+    if st.button("🤖 今日全体のアドバイスを見る", type="primary"):
         if not gemini_ready:
             st.error("APIキーが設定されていません")
         else:
-            with st.spinner("AIがアドバイスを生成中..."):
+            with st.spinner("AIが1日分をまとめて分析中..."):
                 advice = generate_ai_advice(net_cal, required, consumed_nutrients, ideal, today_records)
             st.markdown(f"""
             <div class="advice-card">
-                <div style="font-weight:800; color:var(--purple-dark); margin-bottom:8px; font-size:15px;">🤖 AIからのアドバイス</div>
+                <div style="font-weight:800; color:var(--purple-dark); margin-bottom:8px; font-size:15px;">🤖 今日1日のアドバイス</div>
                 {advice}
             </div>
             """, unsafe_allow_html=True)
