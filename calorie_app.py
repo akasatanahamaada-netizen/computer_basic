@@ -5,8 +5,10 @@ import json
 import re
 import os
 import io
-from datetime import datetime, date
+import uuid
+from datetime import datetime, date, timedelta
 import pandas as pd
+import altair as alt
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -60,6 +62,11 @@ st.markdown("""
         border-radius: 8px;
         margin-bottom: 6px;
         color: #ccc;
+    }
+    div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button {
+        padding: 2px 10px;
+        font-size: 12px;
+        min-height: 28px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -273,6 +280,7 @@ with tab1:
             today_str = date.today().strftime("%Y-%m-%d")
             for d in dishes:
                 st.session_state.meal_log.append({
+                    "id": str(uuid.uuid4()),
                     "date": today_str,
                     "time": now_time,
                     "type": "meal",
@@ -315,6 +323,7 @@ with tab2:
     if st.button("🏃 運動を記録", type="primary"):
         burned = int(EXERCISE_DATABASE[exercise_name] * weight)
         st.session_state.meal_log.append({
+            "id": str(uuid.uuid4()),
             "date": date.today().strftime("%Y-%m-%d"),
             "time": datetime.now().strftime("%H:%M"),
             "type": "exercise",
@@ -380,14 +389,23 @@ with tab3:
         for r in today_records:
             icon = "🍽" if r["type"] == "meal" else "🏃"
             sign = "+" if r["type"] == "meal" else "-"
-            st.markdown(f"""
-            <div class="record-item">
-                <span>{icon} {r['name']}（{r['time']}）</span>
-                <span style="color:{'#e94560' if r['type']=='meal' else '#3498db'}; font-weight:bold;">
-                    {sign}{r['calories']} kcal
-                </span>
-            </div>
-            """, unsafe_allow_html=True)
+            color = "#e94560" if r["type"] == "meal" else "#3498db"
+            row_col1, row_col2 = st.columns([6, 1])
+            with row_col1:
+                st.markdown(f"""
+                <div class="record-item">
+                    <span>{icon} {r['name']}（{r['time']}）</span>
+                    <span style="color:{color}; font-weight:bold;">
+                        {sign}{r['calories']} kcal
+                    </span>
+                </div>
+                """, unsafe_allow_html=True)
+            with row_col2:
+                if st.button("削除", key=f"del_{r['id']}"):
+                    st.session_state.meal_log = [
+                        m for m in st.session_state.meal_log if m["id"] != r["id"]
+                    ]
+                    st.rerun()
     else:
         st.info("まだ記録がありません")
 
@@ -408,35 +426,68 @@ with tab3:
 # タブ4：履歴グラフ
 # ================================================================
 with tab4:
-    st.subheader("📈 カロリー推移")
+    st.subheader("📈 カロリー推移（直近7日間）")
 
     log = st.session_state.meal_log
-    if not log:
-        st.info("まだ記録がありません。食事や運動を記録すると、ここにグラフが表示されます。")
-    else:
-        daily = {}
-        for r in log:
-            d = r["date"]
-            if d not in daily:
-                daily[d] = {"meal": 0, "exercise": 0}
+
+    # 直近7日間（今日を含む）を必ず表示する
+    today_d = date.today()
+    last7_dates = [(today_d - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
+
+    daily = {d: {"meal": 0, "exercise": 0} for d in last7_dates}
+    for r in log:
+        d = r["date"]
+        if d in daily:
             if r["type"] == "meal":
                 daily[d]["meal"] += r["calories"]
             else:
                 daily[d]["exercise"] += r["calories"]
 
-        dates = sorted(daily.keys())[-7:]
+    chart_rows = []
+    for d in last7_dates:
+        label = "/".join(d.split("-")[1:])
+        chart_rows.append({"日付": label, "種類": "摂取カロリー", "kcal": daily[d]["meal"]})
+        chart_rows.append({"日付": label, "種類": "運動消費", "kcal": daily[d]["exercise"]})
 
-        chart_data = pd.DataFrame({
-            "日付": ["/".join(d.split("-")[1:]) for d in dates],
-            "摂取カロリー": [daily[d]["meal"] for d in dates],
-            "運動消費": [daily[d]["exercise"] for d in dates],
-            "実質カロリー": [daily[d]["meal"] - daily[d]["exercise"] for d in dates],
-        })
-        chart_data = chart_data.set_index("日付")
+    bar_df = pd.DataFrame(chart_rows)
 
-        st.bar_chart(chart_data[["摂取カロリー", "運動消費"]])
-        st.line_chart(chart_data[["実質カロリー"]])
-        st.caption(f"目標カロリー: {required} kcal / 日")
+    bar_chart = (
+        alt.Chart(bar_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("日付:N", sort=None, title=None),
+            xOffset="種類:N",
+            y=alt.Y("kcal:Q", scale=alt.Scale(domain=[0, max(1, bar_df['kcal'].max() * 1.15)]), title="kcal"),
+            color=alt.Color("種類:N", scale=alt.Scale(range=["#e94560", "#3498db"]), legend=alt.Legend(title=None, orient="top")),
+            tooltip=["日付", "種類", "kcal"],
+        )
+        .properties(height=300)
+    )
+    st.altair_chart(bar_chart, use_container_width=True)
+
+    net_df = pd.DataFrame({
+        "日付": ["/".join(d.split("-")[1:]) for d in last7_dates],
+        "実質カロリー": [daily[d]["meal"] - daily[d]["exercise"] for d in last7_dates],
+    })
+    net_max = max(required * 1.15, net_df["実質カロリー"].max() * 1.15, 1)
+
+    line_chart = (
+        alt.Chart(net_df)
+        .mark_line(point=True, color="#27ae60")
+        .encode(
+            x=alt.X("日付:N", sort=None, title=None),
+            y=alt.Y("実質カロリー:Q", scale=alt.Scale(domain=[0, net_max])),
+            tooltip=["日付", "実質カロリー"],
+        )
+        .properties(height=220)
+    )
+    goal_line = (
+        alt.Chart(pd.DataFrame({"目標": [required]}))
+        .mark_rule(color="#f39c12", strokeDash=[6, 4])
+        .encode(y="目標:Q")
+    )
+    st.altair_chart(line_chart + goal_line, use_container_width=True)
+    st.caption(f"点線は目標カロリー（{required} kcal / 日）を示しています。棒グラフ・折れ線グラフともに0kcalから表示しています。")
 
     st.divider()
     if st.button("🗑 記録を全削除", type="secondary"):
