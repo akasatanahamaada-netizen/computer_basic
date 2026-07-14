@@ -229,16 +229,7 @@ st.markdown("""
         font-weight: 800 !important;
     }
 
-    /* ---------- プログレスバー ---------- */
-    div[data-testid="stProgress"] > div > div {
-        background: #7FD8D3 !important;
-        border-radius: 999px !important;
-    }
-    div[data-testid="stProgress"] > div {
-        background: var(--coral) !important;
-        border: 2px solid var(--coral-dark) !important;
-        border-radius: 999px !important;
-    }
+    /* プログレスバーは st.progress ではなく自前HTMLで描画するためCSS上書き不要 */
 
     /* ---------- アラート系 ---------- */
     div[data-testid="stAlert"] {
@@ -320,6 +311,17 @@ def calc_ideal_nutrients(required_cal):
 def get_today_records():
     today = date.today().strftime("%Y-%m-%d")
     return [r for r in st.session_state.meal_log if r["date"] == today]
+
+def pop_bar(ratio, height=22):
+    """摂取した分=赤、まだ足りない分=青の1本バーを描画（st.progressは使わない）"""
+    ratio = max(0.0, min(ratio, 1.0))
+    st.markdown(f"""
+    <div style="background:#CDEFEF; border:2.5px solid #29ABA6; border-radius:999px;
+                height:{height}px; overflow:hidden; margin:6px 0;">
+        <div style="background:#FF6B6B; width:{ratio*100:.1f}%; height:100%;
+                    border-radius:999px 0 0 999px;"></div>
+    </div>
+    """, unsafe_allow_html=True)
 
 def estimate_calories_gemini(image):
     prompt = """この写真に写っている料理をすべて認識してください。
@@ -604,7 +606,7 @@ with tab3:
     with col3:
         st.metric("実質カロリー", f"{net_cal} / {required} kcal")
 
-    st.progress(max(0.0, min(ratio / 100, 1.0)))
+    pop_bar(ratio / 100)
     st.caption("🔴 摂取した分　🔵 まだ足りない分")
     if ratio < 50:
         st.warning(f"⚠️ カロリーが不足しています。あと {required - net_cal} kcal 必要です。")
@@ -620,15 +622,15 @@ with tab3:
     with nut_col1:
         carb_ratio = consumed_nutrients["carb"] / ideal["carb"] if ideal["carb"] > 0 else 0
         st.metric("炭水化物", f"{consumed_nutrients['carb']}g / {ideal['carb']}g")
-        st.progress(max(0.0, min(carb_ratio, 1.0)))
+        pop_bar(carb_ratio, height=14)
     with nut_col2:
         pro_ratio = consumed_nutrients["protein"] / ideal["protein"] if ideal["protein"] > 0 else 0
         st.metric("タンパク質", f"{consumed_nutrients['protein']}g / {ideal['protein']}g")
-        st.progress(max(0.0, min(pro_ratio, 1.0)))
+        pop_bar(pro_ratio, height=14)
     with nut_col3:
         fat_ratio = consumed_nutrients["fat"] / ideal["fat"] if ideal["fat"] > 0 else 0
         st.metric("脂質", f"{consumed_nutrients['fat']}g / {ideal['fat']}g")
-        st.progress(max(0.0, min(fat_ratio, 1.0)))
+        pop_bar(fat_ratio, height=14)
 
     st.subheader("今日の記録")
     if today_records:
