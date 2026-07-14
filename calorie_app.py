@@ -231,12 +231,12 @@ st.markdown("""
 
     /* ---------- プログレスバー ---------- */
     div[data-testid="stProgress"] > div > div {
-        background: var(--coral) !important;
+        background: #7FD8D3 !important;
         border-radius: 999px !important;
     }
     div[data-testid="stProgress"] > div {
-        background: #CDEFEF !important;
-        border: 2px solid var(--turquoise) !important;
+        background: var(--coral) !important;
+        border: 2px solid var(--coral-dark) !important;
         border-radius: 999px !important;
     }
 
