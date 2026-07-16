@@ -431,6 +431,7 @@ def nutrient_status(consumed, ideal):
         return "摂りすぎ", "#e67e22", ratio
 
 def generate_ai_advice(consumed, required, consumed_nutrients, ideal_nutrients, today_records):
+    """1日全体のアドバイス＋次の食事のおすすめ献立＋簡単な作り方をまとめて生成する"""
     meals = [r["name"] for r in today_records if r["type"] == "meal"]
     exercises = [r["name"] for r in today_records if r["type"] == "exercise"]
     remaining = required - consumed
@@ -445,8 +446,7 @@ def generate_ai_advice(consumed, required, consumed_nutrients, ideal_nutrients, 
             f"（{status}、{'あと'+str(diff)+'g足りない' if diff > 0 else str(-diff)+'g多い' if diff < 0 else '適量'}）"
         )
 
-    prompt = f"""あなたは栄養管理の専門家です。今日1日全体の食事内容を振り返り、120文字程度で日本語のアドバイスを書いてください。
-1品ごとの感想ではなく、「今日全体として何が足りず、何が多いか」を明確にし、それを補う具体的な食材名を1〜2個挙げてください。
+    prompt = f"""あなたは栄養管理の専門家です。今日1日の食事内容を分析して、以下の情報を出してください。
 
 1日の必要カロリー: {required} kcal
 現在の摂取カロリー: {consumed} kcal（残り {remaining} kcal）
@@ -456,14 +456,34 @@ def generate_ai_advice(consumed, required, consumed_nutrients, ideal_nutrients, 
 栄養素の状況:
 {chr(10).join(status_lines)}
 
-「不足しているもの」「摂りすぎているもの」がある場合はそれを最初に触れ、なければバランスが良いことを褒めてください。"""
+出してほしい情報:
+1. advice: 今日全体として何が足りず何が多いかをまとめたアドバイス（120文字程度。1品ごとの感想ではなく全体の話）
+2. menu_name: 不足を補うのに最適な、次の食事のおすすめ献立名（1品。家庭で作りやすいもの）
+3. menu_reason: なぜその献立がおすすめか（50文字程度）
+4. recipe: その料理の簡単な作り方（3〜5ステップの配列。各ステップ40文字以内）
+
+必ず以下のJSON形式のみで返してください。他のテキストは不要です。
+{{"advice": "...", "menu_name": "...", "menu_reason": "...", "recipe": ["手順1", "手順2", "手順3"]}}"""
 
     try:
         model = genai.GenerativeModel("models/gemini-2.5-flash-lite")
         response = model.generate_content(prompt)
-        return response.text.strip()
-    except:
-        return "アドバイスを生成できませんでした。"
+        text = response.text.strip()
+        text = re.sub(r'^```json|```$', '', text, flags=re.MULTILINE).strip()
+        data = json.loads(text)
+        return {
+            "advice": data.get("advice", ""),
+            "menu_name": data.get("menu_name", ""),
+            "menu_reason": data.get("menu_reason", ""),
+            "recipe": data.get("recipe", []),
+        }
+    except Exception:
+        return {
+            "advice": "アドバイスを生成できませんでした。もう一度お試しください。",
+            "menu_name": "",
+            "menu_reason": "",
+            "recipe": [],
+        }
 
 # ================================================================
 # サイドバー：プロフィール（決断疲れを減らすため必須項目のみ最初に表示）
@@ -676,6 +696,47 @@ with tab3:
 
     ratio = net_cal / required * 100 if required > 0 else 0
 
+    # ---- 🤖 AI分析（一番上に配置） ----
+    if st.button("🤖 AIで今日を分析（アドバイス＋次のおすすめ献立）", type="primary", use_container_width=True):
+        if not gemini_ready:
+            st.error("APIキーが設定されていません")
+        else:
+            with st.spinner("AIが1日分をまとめて分析中..."):
+                result = generate_ai_advice(net_cal, required, consumed_nutrients, ideal, today_records)
+            st.session_state["_ai_result"] = result
+
+    ai_result = st.session_state.get("_ai_result")
+    if ai_result:
+        st.markdown(f"""
+        <div class="advice-card">
+            <div style="font-weight:800; color:var(--purple-dark); margin-bottom:8px; font-size:15px;">🤖 今日1日のアドバイス</div>
+            {ai_result['advice']}
+        </div>
+        """, unsafe_allow_html=True)
+
+        if ai_result.get("menu_name"):
+            recipe_steps = "".join(
+                f"<li style='margin-bottom:6px;'>{step}</li>" for step in ai_result.get("recipe", [])
+            )
+            st.markdown(f"""
+            <div class="dish-card" style="border-color:var(--green); box-shadow:4px 4px 0px var(--green); margin-top:12px;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-weight:800; font-size:16px;">🍳 次の食事のおすすめ：{ai_result['menu_name']}</span>
+                </div>
+                <div style="font-size:13px; color:#8A8494; margin-top:6px; font-weight:500;">
+                    {ai_result['menu_reason']}
+                </div>
+                <div style="margin-top:10px;">
+                    <div style="font-weight:700; font-size:13px; margin-bottom:4px;">かんたんな作り方</div>
+                    <ol style="font-size:13px; color:#5A5462; padding-left:20px; margin:0;">
+                        {recipe_steps}
+                    </ol>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.divider()
+
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("摂取カロリー", f"+{meal_cal} kcal")
@@ -734,19 +795,6 @@ with tab3:
                     st.rerun()
     else:
         st.info("📸 まずは「食事を記録」タブから、今日食べたものを撮ってみましょう")
-
-    if st.button("🤖 今日全体のアドバイスを見る", type="primary"):
-        if not gemini_ready:
-            st.error("APIキーが設定されていません")
-        else:
-            with st.spinner("AIが1日分をまとめて分析中..."):
-                advice = generate_ai_advice(net_cal, required, consumed_nutrients, ideal, today_records)
-            st.markdown(f"""
-            <div class="advice-card">
-                <div style="font-weight:800; color:var(--purple-dark); margin-bottom:8px; font-size:15px;">🤖 今日1日のアドバイス</div>
-                {advice}
-            </div>
-            """, unsafe_allow_html=True)
 
 # ================================================================
 # タブ4：履歴グラフ
