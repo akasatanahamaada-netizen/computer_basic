@@ -265,16 +265,27 @@ except Exception:
     st.error("APIキーが設定されていません。Streamlit Cloudの Settings → Secrets に GEMINI_API_KEY を設定してください。")
 
 # ================================================================
-# セッション状態の初期化（Firebase Realtime Database から復元）
+# ユーザー識別（ニックネームでFirebase内のデータを分ける）
 # ================================================================
 FIREBASE_URL = st.secrets.get("FIREBASE_DB_URL", "").rstrip("/")
 
-def load_meal_log_from_firebase():
-    """Firebaseから記録を取得する"""
-    if not FIREBASE_URL:
+def sanitize_user_id(name):
+    """Firebaseのキーに使えない文字を除去する"""
+    name = name.strip()
+    for ch in ['.', '#', '$', '[', ']', '/']:
+        name = name.replace(ch, '')
+    return name[:40]
+
+# URLのクエリパラメータにニックネームがあれば復元（ブックマークで次回も同じデータに戻れる）
+if "user_id" not in st.session_state:
+    st.session_state.user_id = sanitize_user_id(st.query_params.get("user", ""))
+
+def load_meal_log_from_firebase(user_id):
+    """Firebaseからそのユーザーの記録だけを取得する"""
+    if not FIREBASE_URL or not user_id:
         return []
     try:
-        resp = requests.get(f"{FIREBASE_URL}/meal_log.json", timeout=6)
+        resp = requests.get(f"{FIREBASE_URL}/users/{user_id}/meal_log.json", timeout=6)
         data = resp.json()
         if isinstance(data, list):
             return [d for d in data if d]
@@ -286,13 +297,17 @@ def load_meal_log_from_firebase():
         return []
 
 def persist_log():
-    """記録をFirebaseに保存する（次回アクセス時・別端末でも残る）"""
+    """記録をFirebaseに保存する（自分のニックネーム配下にのみ保存される）"""
+    user_id = st.session_state.get("user_id", "")
     if not FIREBASE_URL:
         st.session_state["_fb_save_error"] = "FIREBASE_DB_URL が設定されていません"
         return False
+    if not user_id:
+        st.session_state["_fb_save_error"] = "ニックネームが未設定です"
+        return False
     try:
         resp = requests.put(
-            f"{FIREBASE_URL}/meal_log.json",
+            f"{FIREBASE_URL}/users/{user_id}/meal_log.json",
             json=st.session_state.meal_log,
             timeout=6,
         )
@@ -306,7 +321,7 @@ def persist_log():
         return False
 
 if "meal_log" not in st.session_state:
-    st.session_state.meal_log = load_meal_log_from_firebase()
+    st.session_state.meal_log = load_meal_log_from_firebase(st.session_state.user_id)
 
 # ================================================================
 # 運動データベース
@@ -489,6 +504,29 @@ def generate_ai_advice(consumed, required, consumed_nutrients, ideal_nutrients, 
 # サイドバー：プロフィール（決断疲れを減らすため必須項目のみ最初に表示）
 # ================================================================
 with st.sidebar:
+    st.header("🏷️ ニックネーム")
+    st.caption("記録を自分専用に分けて保存します")
+    nickname_input = st.text_input(
+        "ニックネームを入力してね",
+        value=st.session_state.user_id,
+        placeholder="例：たなか",
+        label_visibility="collapsed",
+    )
+    new_user_id = sanitize_user_id(nickname_input)
+    if new_user_id != st.session_state.user_id:
+        st.session_state.user_id = new_user_id
+        st.query_params["user"] = new_user_id
+        # ニックネームが変わったら、その人のデータを読み直す
+        st.session_state.meal_log = load_meal_log_from_firebase(new_user_id)
+        st.rerun()
+
+    if st.session_state.user_id:
+        st.caption(f"✅「{st.session_state.user_id}」として記録中")
+    else:
+        st.warning("⚠️ ニックネームを入れると記録できます")
+
+    st.divider()
+
     st.header("👤 あなたの情報")
     st.caption("身長・体重だけでもすぐ使えます")
     height = st.number_input("身長 (cm)", value=165.0, step=0.1)
@@ -525,7 +563,7 @@ with st.sidebar:
         if st.session_state.get("_fb_load_error"):
             st.caption(f"⚠️ 読み込みエラー: {st.session_state._fb_load_error}")
         if st.button("🔄 データベースから再読み込み"):
-            st.session_state.meal_log = load_meal_log_from_firebase()
+            st.session_state.meal_log = load_meal_log_from_firebase(st.session_state.user_id)
             st.rerun()
 
 # ================================================================
@@ -544,6 +582,10 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 st.markdown('<div class="sub-title">もぐもぐレコード｜AIが料理をパシャッと認識！記録も分析もぜんぶおまかせ ✨</div>', unsafe_allow_html=True)
+
+if not st.session_state.user_id:
+    st.info("👈 左のサイドバーで「ニックネーム」を入力すると、あなた専用の記録が始まります！")
+    st.stop()
 
 tab1, tab2, tab3, tab4 = st.tabs(["🍽️ 食事を記録", "🏃 運動を記録", "📊 今日のまとめ", "📈 履歴グラフ"])
 
