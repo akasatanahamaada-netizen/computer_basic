@@ -805,6 +805,25 @@ with tab1:
         clahe_bgr = apply_clahe(img_bgr)
         clahe_pil = Image.fromarray(cv2.cvtColor(clahe_bgr, cv2.COLOR_BGR2RGB))
 
+        with st.expander("🔍 ①コントラスト補正（CLAHE）の効果を確認する", expanded=False):
+            gray_before = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            gray_after = cv2.cvtColor(clahe_bgr, cv2.COLOR_BGR2GRAY)
+            contrast_before = float(gray_before.std())
+            contrast_after = float(gray_after.std())
+
+            col_before, col_after = st.columns(2)
+            with col_before:
+                st.image(pil_original, caption="元画像", use_container_width=True)
+                st.metric("コントラストの目安（輝度の標準偏差）", f"{contrast_before:.1f}")
+            with col_after:
+                st.image(clahe_pil, caption="CLAHE補正後", use_container_width=True)
+                st.metric(
+                    "コントラストの目安（輝度の標準偏差）",
+                    f"{contrast_after:.1f}",
+                    delta=f"{contrast_after - contrast_before:+.1f}",
+                )
+            st.caption("💡 数値が大きいほど明暗の差がはっきりしています。暗い写真や影が強い写真ほど、補正後の数値が上がりやすくなります。")
+
         # ② お皿・料理領域の検出はGeminiに任せる（同じ写真での再実行はキャッシュして無駄なAPI呼び出しを防ぐ）
         file_key = f"{uploaded_file.name}_{uploaded_file.size}"
         cache_key = f"detected_regions_{file_key}"
@@ -837,7 +856,8 @@ with tab1:
 
                 crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
                 with cols[i % n_cols]:
-                    st.image(crop_rgb, caption=f"#{i + 1}", use_container_width=True)
+                    plate_caption = f"#{i + 1}" + (f"（{region.get('label')}）" if region.get("label") else "")
+                    st.image(crop_rgb, caption=plate_caption, use_container_width=True)
                     checked = st.checkbox(
                         f"#{i + 1} を選択", value=True, key=f"plate_select_{uploaded_file.name}_{uploaded_file.size}_{i}"
                     )
