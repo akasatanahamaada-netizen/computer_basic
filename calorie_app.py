@@ -7,6 +7,8 @@ import re
 import os
 import io
 import uuid
+import cv2
+import numpy as np
 from datetime import datetime, date, timedelta
 import pandas as pd
 import altair as alt
@@ -382,7 +384,90 @@ def pop_bar(ratio, height=22):
     </div>
     """, unsafe_allow_html=True)
 
-def estimate_calories_gemini(image):
+# ================================================================
+# OpenCV 処理関数（前処理・お皿検出・色彩解析）
+# ================================================================
+def apply_clahe(img_bgr: np.ndarray) -> np.ndarray:
+    """暗い場所・影対策のコントラスト補正（CLAHE）"""
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    l2 = clahe.apply(l)
+    lab2 = cv2.merge((l2, a, b))
+    return cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
+
+
+def detect_plate_regions(img_bgr: np.ndarray, low: int = 50, high: int = 150, min_ratio: float = 0.02, max_regions: int = 8):
+    """Canny + findContours でお皿・料理領域を検出"""
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, low, high)
+    edges = cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=2)
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    h, w = img_bgr.shape[:2]
+    min_area = h * w * min_ratio
+
+    regions = []
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < min_area:
+            continue
+        x, y, bw, bh = cv2.boundingRect(c)
+        regions.append({"contour": c, "bbox": (x, y, bw, bh), "area": area})
+
+    regions.sort(key=lambda r: r["area"], reverse=True)
+    return regions[:max_regions]
+
+
+def draw_plate_boxes(img_bgr: np.ndarray, regions: list) -> np.ndarray:
+    """検出領域に番号付き緑色バウンディングボックスを描画"""
+    out = img_bgr.copy()
+    for i, r in enumerate(regions):
+        x, y, w, h = r["bbox"]
+        cv2.rectangle(out, (x, y), (x + w, y + h), (0, 255, 0), 3)
+        label = f"#{i + 1}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)
+        label_y = max(y - 10, th + 10)
+        cv2.rectangle(out, (x, label_y - th - 8), (x + tw + 8, label_y + 4), (0, 255, 0), -1)
+        cv2.putText(out, label, (x + 4, label_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
+    return out
+
+
+def get_plate_crop_and_mask(img_bgr: np.ndarray, region: dict):
+    """バウンディングボックスで切り抜き、輪郭内部のマスクを作成"""
+    x, y, w, h = region["bbox"]
+    crop = img_bgr[y:y + h, x:x + w].copy()
+    mask = np.zeros((h, w), dtype=np.uint8)
+    shifted_contour = region["contour"] - np.array([x, y])
+    cv2.drawContours(mask, [shifted_contour], -1, 255, thickness=-1)
+    return crop, mask
+
+
+def analyze_plate_colors(crop_bgr: np.ndarray, mask: np.ndarray) -> dict:
+    """輪郭内部のHSV色彩比率を計算（緑・赤茶・黄・白）"""
+    hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+    inside = mask > 0
+    total = int(np.count_nonzero(inside))
+
+    if total == 0:
+        return {"green": 0.0, "red_brown": 0.0, "yellow": 0.0, "white": 0.0}
+
+    def pct(cond):
+        return round(float(np.count_nonzero(cond & inside)) / total * 100, 1)
+
+    return {
+        "green": pct((h >= 35) & (h <= 85)),
+        "red_brown": pct(((h >= 0) & (h <= 15)) | ((h >= 170) & (h <= 180))),
+        "yellow": pct((h > 15) & (h < 35)),
+        "white": pct((s < 50) & (v > 150)),
+    }
+
+
+def estimate_calories_gemini(image, cv_context=None):
     prompt = """この写真に写っている料理をすべて認識してください。
 カロリーや栄養素は、写真に写っている実際の量に基づいて推定してください。
 五大栄養素（タンパク質・脂質・炭水化物・ビタミン・ミネラル）の観点で分析してください。
@@ -414,6 +499,18 @@ def estimate_calories_gemini(image):
 ]}
 
 複数の料理が写っている場合はすべて含めてください。"""
+
+    if cv_context:
+        prompt += f"""
+
+【参考：画像解析(OpenCV)による事前データ】
+この写真はお皿の領域を切り抜いたものです。以下の数値を分量・品目推定の参考にしてください。
+- 皿の輪郭面積: {cv_context['area']} px
+- 緑色（野菜など）の割合: {cv_context['colors']['green']}%
+- 赤茶色（肉・揚げ物など）の割合: {cv_context['colors']['red_brown']}%
+- 黄色（卵・カレーなど）の割合: {cv_context['colors']['yellow']}%
+- 白色（米・豆腐など）の割合: {cv_context['colors']['white']}%
+"""
 
     try:
         model = genai.GenerativeModel("models/gemini-2.5-flash-lite")
@@ -674,22 +771,69 @@ with tab1:
     st.subheader("料理写真をアップロードして記録")
     uploaded_file = st.file_uploader("写真を選ぶ", type=["jpg", "jpeg", "png", "webp"])
 
-    if uploaded_file and st.button("🔍 料理を分析して記録", type="primary"):
+    analyze_targets = []
+
+    if uploaded_file:
+        pil_original = Image.open(uploaded_file).convert("RGB")
+        img_rgb = np.array(pil_original)
+        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+
+        # ① CLAHEで前処理（暗所・影対策のコントラスト補正）
+        clahe_bgr = apply_clahe(img_bgr)
+
+        # ② Canny + findContours でお皿・料理領域を自動検出
+        regions = detect_plate_regions(clahe_bgr)
+
+        if regions:
+            boxed_bgr = draw_plate_boxes(clahe_bgr, regions)
+            st.image(
+                cv2.cvtColor(boxed_bgr, cv2.COLOR_BGR2RGB),
+                caption=f"🍽 {len(regions)} 件のお皿を検出しました",
+                use_container_width=True,
+            )
+
+            st.markdown("**分析したいお皿を選んでください（複数選択可・チェックを外すと除外できます）**")
+            n_cols = min(len(regions), 4)
+            cols = st.columns(n_cols)
+            for i, region in enumerate(regions):
+                crop_bgr, mask = get_plate_crop_and_mask(clahe_bgr, region)
+                crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+                with cols[i % n_cols]:
+                    st.image(crop_rgb, caption=f"#{i + 1}", use_container_width=True)
+                    checked = st.checkbox(
+                        f"#{i + 1} を選択", value=True, key=f"plate_select_{uploaded_file.name}_{uploaded_file.size}_{i}"
+                    )
+                if checked:
+                    colors = analyze_plate_colors(crop_bgr, mask)
+                    analyze_targets.append({
+                        "crop_pil": Image.fromarray(crop_rgb),
+                        "area": int(region["area"]),
+                        "colors": colors,
+                    })
+        else:
+            # 検出できなかった場合は、今まで通り写真全体をそのままGeminiに渡す
+            st.image(pil_original, caption="アップロードした写真", use_container_width=True)
+            st.caption("⚠️ お皿の自動検出ができなかったため、写真全体をそのままAIに渡します。")
+            analyze_targets.append({"crop_pil": pil_original, "area": None, "colors": None})
+
+    if uploaded_file and st.button("🔍 選択したお皿を分析して記録", type="primary"):
         if not gemini_ready:
             st.error("APIキーが設定されていません")
+        elif not analyze_targets:
+            st.warning("分析するお皿が選択されていません。")
         else:
-            image = Image.open(uploaded_file).convert("RGB")
-            col_img, col_result = st.columns([1, 1])
-
-            with col_img:
-                st.image(image, caption="アップロードした写真", use_container_width=True)
-
+            all_dishes = []
             with st.spinner("🤖 Gemini AIが料理を認識中..."):
-                dishes = estimate_calories_gemini(image)
+                for target in analyze_targets:
+                    cv_context = None
+                    if target["area"] is not None:
+                        cv_context = {"area": target["area"], "colors": target["colors"]}
+                    dishes = estimate_calories_gemini(target["crop_pil"], cv_context=cv_context)
+                    all_dishes.extend(dishes)
 
             now_time = datetime.now().strftime("%H:%M")
             today_str = date.today().strftime("%Y-%m-%d")
-            for d in dishes:
+            for d in all_dishes:
                 st.session_state.meal_log.append({
                     "id": str(uuid.uuid4()),
                     "date": today_str,
@@ -703,41 +847,40 @@ with tab1:
                 })
             persist_log()
 
-            with col_result:
-                total_cal = sum(d["calories"] for d in dishes)
-                st.success(f"✅ {len(dishes)}品を認識しました！（合計 {total_cal} kcal）")
+            total_cal = sum(d["calories"] for d in all_dishes)
+            st.success(f"✅ {len(all_dishes)}品を認識しました！（合計 {total_cal} kcal）")
 
-                for d in dishes:
-                    nut = d["nutrients"]
-                    vit_tags = "".join(
-                        f"<span class='badge' style='background:var(--sunny); color:#2D2A32; margin-right:4px;'>{v}</span>"
-                        for v in d.get("vitamins", [])
-                    )
-                    min_tags = "".join(
-                        f"<span class='badge' style='background:var(--green); margin-right:4px;'>{m}</span>"
-                        for m in d.get("minerals", [])
-                    )
-                    tag_row = ""
-                    if vit_tags or min_tags:
-                        tag_row = f"<div style='margin-top:8px; display:flex; flex-wrap:wrap; gap:4px;'>{vit_tags}{min_tags}</div>"
-                    st.markdown(f"""
-                    <div class="dish-card">
-                        <div style="display:flex; justify-content:space-between; align-items:center;">
-                            <span style="font-weight:800; font-size:16px;">🍴 {d['name']}</span>
-                            <span class="badge" style="background:var(--coral);">{d['calories']} kcal</span>
-                        </div>
-                        <div style="font-size:12px; color:#8A8494; margin-top:6px; font-weight:500;">
-                            炭水化物 {nut['carb']}g（糖質 {nut['sugar']}g）・タンパク質 {nut['protein']}g・脂質 {nut['fat']}g・塩分 {nut['salt']}g
-                        </div>
-                        <div style="display:flex; align-items:center; gap:8px; margin-top:8px;">
-                            <span class="badge" style="background:var(--turquoise);">
-                                確信度 {d['confidence']*100:.0f}%
-                            </span>
-                        </div>
-                        {tag_row}
+            for d in all_dishes:
+                nut = d["nutrients"]
+                vit_tags = "".join(
+                    f"<span class='badge' style='background:var(--sunny); color:#2D2A32; margin-right:4px;'>{v}</span>"
+                    for v in d.get("vitamins", [])
+                )
+                min_tags = "".join(
+                    f"<span class='badge' style='background:var(--green); margin-right:4px;'>{m}</span>"
+                    for m in d.get("minerals", [])
+                )
+                tag_row = ""
+                if vit_tags or min_tags:
+                    tag_row = f"<div style='margin-top:8px; display:flex; flex-wrap:wrap; gap:4px;'>{vit_tags}{min_tags}</div>"
+                st.markdown(f"""
+                <div class="dish-card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <span style="font-weight:800; font-size:16px;">🍴 {d['name']}</span>
+                        <span class="badge" style="background:var(--coral);">{d['calories']} kcal</span>
                     </div>
-                    """, unsafe_allow_html=True)
-                st.caption("💡 1日の栄養バランスは「今日のまとめ」タブでまとめて確認できます")
+                    <div style="font-size:12px; color:#8A8494; margin-top:6px; font-weight:500;">
+                        炭水化物 {nut['carb']}g（糖質 {nut['sugar']}g）・タンパク質 {nut['protein']}g・脂質 {nut['fat']}g・塩分 {nut['salt']}g
+                    </div>
+                    <div style="display:flex; align-items:center; gap:8px; margin-top:8px;">
+                        <span class="badge" style="background:var(--turquoise);">
+                            確信度 {d['confidence']*100:.0f}%
+                        </span>
+                    </div>
+                    {tag_row}
+                </div>
+                """, unsafe_allow_html=True)
+            st.caption("💡 1日の栄養バランスは「今日のまとめ」タブでまとめて確認できます")
 
 # ================================================================
 # タブ2：運動を記録
