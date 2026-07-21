@@ -397,23 +397,27 @@ def apply_clahe(img_bgr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
 
 
-def detect_plate_regions(img_bgr: np.ndarray, low: int = 50, high: int = 150, min_ratio: float = 0.02, max_regions: int = 8):
+def detect_plate_regions(img_bgr: np.ndarray, low: int = 50, high: int = 150, min_ratio: float = 0.02, max_ratio: float = 0.45, max_regions: int = 10):
     """Canny + findContours でお皿・料理領域を検出"""
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blurred, low, high)
-    edges = cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=2)
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    # つなげる処理は控えめに（強すぎると複数の皿がまとめて1つの塊になってしまう）
+    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
 
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     h, w = img_bgr.shape[:2]
-    min_area = h * w * min_ratio
+    frame_area = h * w
+    min_area = frame_area * min_ratio
+    max_area = frame_area * max_ratio
 
     regions = []
     for c in contours:
         area = cv2.contourArea(c)
-        if area < min_area:
+        # 画像全体に近いサイズの塊は「複数の皿が結合してしまった誤検出」とみなして除外
+        if area < min_area or area > max_area:
             continue
         x, y, bw, bh = cv2.boundingRect(c)
         regions.append({"contour": c, "bbox": (x, y, bw, bh), "area": area})
@@ -771,6 +775,16 @@ with tab1:
     st.subheader("料理写真をアップロードして記録")
     uploaded_file = st.file_uploader("写真を選ぶ", type=["jpg", "jpeg", "png", "webp"])
 
+    with st.expander("🔧 お皿の検出設定（うまく検出できない場合はここを調整）"):
+        det_col1, det_col2 = st.columns(2)
+        with det_col1:
+            canny_low = st.slider("エッジ検出の下限", 10, 150, 50, 5, key="canny_low")
+            min_ratio = st.slider("検出する最小サイズ（画像全体に対する割合）", 0.005, 0.15, 0.02, 0.005, key="min_ratio")
+        with det_col2:
+            canny_high = st.slider("エッジ検出の上限", 50, 300, 150, 5, key="canny_high")
+            max_ratio = st.slider("検出する最大サイズ（大きすぎる塊を除外）", 0.2, 0.9, 0.45, 0.05, key="max_ratio")
+        st.caption("💡 複数のお皿が1つの塊として検出される場合は「最大サイズ」を下げてください。逆にお皿が検出されない場合は「最小サイズ」を下げてみてください。")
+
     analyze_targets = []
 
     if uploaded_file:
@@ -782,7 +796,7 @@ with tab1:
         clahe_bgr = apply_clahe(img_bgr)
 
         # ② Canny + findContours でお皿・料理領域を自動検出
-        regions = detect_plate_regions(clahe_bgr)
+        regions = detect_plate_regions(clahe_bgr, low=canny_low, high=canny_high, min_ratio=min_ratio, max_ratio=max_ratio)
 
         if regions:
             boxed_bgr = draw_plate_boxes(clahe_bgr, regions)
