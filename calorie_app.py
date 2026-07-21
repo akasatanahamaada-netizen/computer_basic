@@ -385,44 +385,53 @@ def apply_clahe(img_bgr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
 
 def detect_plates_opencv(img_bgr: np.ndarray) -> list:
+    """OpenCVのエッジ検出（Canny）を使ってお皿の領域を検出する"""
     h_img, w_img = img_bgr.shape[:2]
     img_area = h_img * w_img
 
+    # 1. グレースケール化と強力なノイズ除去（木目を消すためメディアンブラーを採用）
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    blurred = cv2.medianBlur(gray, 15)
 
-    thresh = cv2.adaptiveThreshold(
-        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY_INV, 19, 3
-    )
+    # 2. Canny法によるエッジ検出（輪郭線だけを抽出）
+    edges = cv2.Canny(blurred, 40, 120)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    morphed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+    # 3. 検出したエッジの隙間を埋めて繋げる
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-    contours, _ = cv2.findContours(morphed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # 4. 輪郭抽出
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     regions = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if img_area * 0.015 < area < img_area * 0.85:
+        
+        # 面積フィルタ: 見切れているお皿も拾えるよう下限・上限を調整
+        if img_area * 0.02 < area < img_area * 0.80:
             x, y, w, h = cv2.boundingRect(cnt)
+            
+            # アスペクト比の判定
             aspect_ratio = float(w) / h
-            if 0.3 < aspect_ratio < 3.0:
+            if 0.4 < aspect_ratio < 2.5:
                 regions.append({
                     "bbox": (x, y, w, h),
                     "area": int(area),
                     "label": "お皿",
-                    "contour": cnt, 
+                    "contour": cnt,
                 })
 
+    # 面積が大きい順にソート
     regions = sorted(regions, key=lambda r: r["area"], reverse=True)
     
+    # 重なり除去
     filtered_regions = []
     for r in regions:
         rx, ry, rw, rh = r["bbox"]
         overlap = False
         for fr in filtered_regions:
             fx, fy, fw, fh = fr["bbox"]
+            # 中心点が他の枠の中に入っている場合は重複とみなしてスキップ
             if fx <= rx + rw//2 <= fx + fw and fy <= ry + rh//2 <= fy + fh:
                 overlap = True
                 break
