@@ -385,73 +385,54 @@ def apply_clahe(img_bgr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
 
 def detect_plates_opencv(img_bgr: np.ndarray) -> list:
-    """料理（色彩・コントラスト）の領域を検出し、マージンを広げてお皿枠を作る"""
+    """OpenCVのエッジ検出（Canny）を使ってお皿の領域を検出する"""
     h_img, w_img = img_bgr.shape[:2]
     img_area = h_img * w_img
 
-    # 1. グレースケール化と平滑化
+    # 1. グレースケール化と強力なノイズ除去（木目を消すためメディアンブラーを採用）
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+    blurred = cv2.medianBlur(gray, 15)
 
-    # 2. 彩度（Saturation）情報を抽出（木目背景は色が薄く、料理は色彩が豊かなため）
-    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-    sat = hsv[:, :, 1] # Sチャンネル（彩度）
+    # 2. Canny法によるエッジ検出（輪郭線だけを抽出）
+    edges = cv2.Canny(blurred, 40, 120)
 
-    # 3. 輝度変化（エッジ）と彩度のハイブリッド二値化
-    grad_x = cv2.Sobel(blurred, cv2.CV_16S, 1, 0, ksize=3)
-    grad_y = cv2.Sobel(blurred, cv2.CV_16S, 0, 1, ksize=3)
-    abs_grad = cv2.addWeighted(cv2.convertScaleAbs(grad_x), 0.5, cv2.convertScaleAbs(grad_y), 0.5, 0)
-    
-    # 彩度とエッジを合成して料理の存在感（フィーチャーマップ）を作る
-    combined = cv2.addWeighted(abs_grad, 0.6, sat, 0.4, 0)
+    # 3. 検出したエッジの隙間を埋めて繋げる
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-    # 大津の二値化で料理領域を特定
-    _, thresh = cv2.threshold(combined, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # 4. 料理の細かい具材を結合（クロージング処理）
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-    morphed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=3)
-
-    # 5. 輪郭抽出
-    contours, _ = cv2.findContours(morphed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # 4. 輪郭抽出
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     regions = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
-
-        # 小さすぎるノイズや巨大すぎる画面全体を除外
-        if img_area * 0.01 < area < img_area * 0.60:
+        
+        # 面積フィルタ: 見切れているお皿も拾えるよう下限・上限を調整
+        if img_area * 0.02 < area < img_area * 0.80:
             x, y, w, h = cv2.boundingRect(cnt)
-
-            # --- 🔥 マージン拡張（お皿全体が入るように枠を外側に30%広げる）---
-            margin_w = int(w * 0.25)
-            margin_h = int(h * 0.25)
-            x_new = max(0, x - margin_w)
-            y_new = max(0, y - margin_h)
-            w_new = min(w_img - x_new, w + margin_w * 2)
-            h_new = min(h_img - y_new, h + margin_h * 2)
-
-            aspect_ratio = float(w_new) / h_new
-            if 0.3 < aspect_ratio < 3.0:
+            
+            # アスペクト比の判定
+            aspect_ratio = float(w) / h
+            if 0.4 < aspect_ratio < 2.5:
                 regions.append({
-                    "bbox": (x_new, y_new, w_new, h_new),
-                    "area": int(w_new * h_new),
+                    "bbox": (x, y, w, h),
+                    "area": int(area),
                     "label": "お皿",
                     "contour": cnt,
                 })
 
-    # 面積順にソート
+    # 面積が大きい順にソート
     regions = sorted(regions, key=lambda r: r["area"], reverse=True)
-
-    # 重なりすぎている枠の除去（NMS）
+    
+    # 重なり除去
     filtered_regions = []
     for r in regions:
         rx, ry, rw, rh = r["bbox"]
         overlap = False
         for fr in filtered_regions:
             fx, fy, fw, fh = fr["bbox"]
-            # 重なり判定（中心点が被っているか）
-            if fx <= rx + rw // 2 <= fx + fw and fy <= ry + rh // 2 <= fy + fh:
+            # 中心点が他の枠の中に入っている場合は重複とみなしてスキップ
+            if fx <= rx + rw//2 <= fx + fw and fy <= ry + rh//2 <= fy + fh:
                 overlap = True
                 break
         if not overlap:
