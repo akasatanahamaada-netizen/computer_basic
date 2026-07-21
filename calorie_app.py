@@ -385,35 +385,60 @@ def apply_clahe(img_bgr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
 
 def detect_plates_opencv(img_bgr: np.ndarray) -> list:
-    """OpenCVのエッジ検出（Canny）を使ってお皿の領域を検出する"""
+    """ウォーターシェッド（cv2.watershed）を使って密着したお皿を分離抽出する"""
     h_img, w_img = img_bgr.shape[:2]
     img_area = h_img * w_img
 
-    # 1. グレースケール化と強力なノイズ除去（木目を消すためメディアンブラーを採用）
+    # 1. グレースケール化とノイズ除去
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.medianBlur(gray, 15)
+    blurred = cv2.medianBlur(gray, 9)
 
-    # 2. Canny法によるエッジ検出（輪郭線だけを抽出）
-    edges = cv2.Canny(blurred, 40, 120)
+    # 2. 二値化（大津の二値化＋適応的二値化のブレンド）
+    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # 3. 検出したエッジの隙間を埋めて繋げる
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
+    # ノイズ除去（オープニング処理）
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
 
-    # 4. 輪郭抽出
-    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # 3. 確実に背景である領域（Sure Background）の抽出
+    sure_bg = cv2.dilate(opening, kernel, iterations=3)
 
+    # 4. 確実に前景（お皿/料理の中心）である領域（Sure Foreground）の抽出
+    # 距離変換を使って「中心から遠いところ＝お皿の真ん中」をシードにする
+    dist_transform = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
+    _, sure_fg = cv2.threshold(dist_transform, 0.25 * dist_transform.max(), 255, 0)
+    sure_fg = np.uint8(sure_fg)
+
+    # 5. 未確定領域（Unknown）の特定（背景 - 前景）
+    unknown = cv2.subtract(sure_bg, sure_fg)
+
+    # 6. マーキング（シード付け）
+    num_labels, markers = cv2.connectedComponents(sure_fg)
+    # 背景を1、未確定領域を0にするために+1
+    markers = markers + 1
+    markers[unknown == 255] = 0
+
+    # 7. ウォーターシェッド実行！
+    markers = cv2.watershed(img_bgr, markers)
+
+    # 8. 分割された各マーカー（お皿）からバウンディングボックスを取得
     regions = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
+    for label in range(2, num_labels + 1):  # 1は背景なので2から開始
+        # 各ラベルのマスクを作成
+        mask = np.uint8(markers == label)
         
-        # 面積フィルタ: 見切れているお皿も拾えるよう下限・上限を調整
-        if img_area * 0.02 < area < img_area * 0.80:
-            x, y, w, h = cv2.boundingRect(cnt)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
             
-            # アスペクト比の判定
+        cnt = contours[0]
+        area = cv2.contourArea(cnt)
+
+        # 面積フィルタ（ノイズ除外＆極端に巨大な枠を除外）
+        if img_area * 0.015 < area < img_area * 0.75:
+            x, y, w, h = cv2.boundingRect(cnt)
             aspect_ratio = float(w) / h
-            if 0.4 < aspect_ratio < 2.5:
+            if 0.35 < aspect_ratio < 2.8:
                 regions.append({
                     "bbox": (x, y, w, h),
                     "area": int(area),
@@ -421,24 +446,9 @@ def detect_plates_opencv(img_bgr: np.ndarray) -> list:
                     "contour": cnt,
                 })
 
-    # 面積が大きい順にソート
+    # 面積順にソート
     regions = sorted(regions, key=lambda r: r["area"], reverse=True)
-    
-    # 重なり除去
-    filtered_regions = []
-    for r in regions:
-        rx, ry, rw, rh = r["bbox"]
-        overlap = False
-        for fr in filtered_regions:
-            fx, fy, fw, fh = fr["bbox"]
-            # 中心点が他の枠の中に入っている場合は重複とみなしてスキップ
-            if fx <= rx + rw//2 <= fx + fw and fy <= ry + rh//2 <= fy + fh:
-                overlap = True
-                break
-        if not overlap:
-            filtered_regions.append(r)
-
-    return filtered_regions
+    return regions
 
 def draw_plate_boxes(img_bgr: np.ndarray, regions: list) -> np.ndarray:
     out = img_bgr.copy()
