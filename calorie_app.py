@@ -355,11 +355,16 @@ def calc_required_calories(height, weight, age, gender, activity):
     }
     return int(bmr * activity_map.get(activity, 1.2))
 
-def calc_ideal_nutrients(required_cal):
+def calc_ideal_nutrients(required_cal, gender="男性"):
+    """五大栄養素（タンパク質・脂質・炭水化物・ビタミン・ミネラル）のうち、
+    数値で管理できる炭水化物・糖質・タンパク質・脂質・塩分の目安量を計算する。
+    ビタミン・ミネラルは種類のバラエティで管理する（下部の集計処理を参照）。"""
     return {
-        "carb": int(required_cal * 0.60 / 4),
-        "protein": int(required_cal * 0.15 / 4),
-        "fat": int(required_cal * 0.25 / 9),
+        "carb": int(required_cal * 0.60 / 4),      # 炭水化物：総カロリーの60%
+        "sugar": int(required_cal * 0.10 / 4),     # 糖質：総カロリーの10%以内が目安（WHO指針）
+        "protein": int(required_cal * 0.15 / 4),   # タンパク質：総カロリーの15%
+        "fat": int(required_cal * 0.25 / 9),       # 脂質：総カロリーの25%
+        "salt": 7.5 if gender == "男性" else 6.5,  # 塩分：厚労省の目標量（g/日）
     }
 
 def get_today_records():
@@ -380,12 +385,16 @@ def pop_bar(ratio, height=22):
 def estimate_calories_gemini(image):
     prompt = """この写真に写っている料理をすべて認識してください。
 カロリーや栄養素は、写真に写っている実際の量に基づいて推定してください。
+五大栄養素（タンパク質・脂質・炭水化物・ビタミン・ミネラル）の観点で分析してください。
 
 重要：
 - 寿司は1貫あたり約40〜60kcalです。写真の貫数を数えて計算してください。
 - 小鉢や副菜は量が少ないので、カロリーも低く見積もってください。
 - 大盛りや普通盛りなど、見た目の量を考慮してください。
 - 写真に写っている実際の量を正確に反映した数値にしてください。
+- 糖質は炭水化物の一部（炭水化物から食物繊維を除いたもの）です。炭水化物以下の数値にしてください。
+- 塩分（食塩相当量）はグラム数で推定してください。
+- ビタミン・ミネラルは、その料理に多く含まれる代表的なものを日本語の名称で最大3つずつ挙げてください（例：ビタミンC、ビタミンB1、鉄、カルシウム、カリウムなど）。特に何も豊富でなければ空配列で構いません。
 
 1つだけの場合も、複数ある場合も、以下のJSON形式で返してください。他のテキストは不要です。
 
@@ -394,8 +403,12 @@ def estimate_calories_gemini(image):
     "name": "料理名（日本語。寿司なら種類と貫数も書く）",
     "calories": カロリー（写真の実際の量に基づく数値のみ）,
     "carb": 炭水化物グラム数（数値のみ）,
+    "sugar": 糖質グラム数（炭水化物以下の数値のみ）,
     "protein": タンパク質グラム数（数値のみ）,
     "fat": 脂質グラム数（数値のみ）,
+    "salt": 食塩相当量グラム数（数値のみ、小数可）,
+    "vitamins": ["含まれる代表的なビタミン（最大3つ）"],
+    "minerals": ["含まれる代表的なミネラル（最大3つ）"],
     "confidence": 確信度0.0〜1.0
   }
 ]}
@@ -415,9 +428,13 @@ def estimate_calories_gemini(image):
                 "calories": int(d.get("calories", 0)),
                 "nutrients": {
                     "carb": int(d.get("carb", 0)),
+                    "sugar": int(d.get("sugar", 0)),
                     "protein": int(d.get("protein", 0)),
                     "fat": int(d.get("fat", 0)),
+                    "salt": round(float(d.get("salt", 0)), 1),
                 },
+                "vitamins": d.get("vitamins", []) or [],
+                "minerals": d.get("minerals", []) or [],
                 "confidence": float(d.get("confidence", 0.5)),
             })
         if not dishes:
@@ -428,15 +445,17 @@ def estimate_calories_gemini(image):
         return [{
             "name": "認識できませんでした",
             "calories": 0,
-            "nutrients": {"carb": 0, "protein": 0, "fat": 0},
+            "nutrients": {"carb": 0, "sugar": 0, "protein": 0, "fat": 0, "salt": 0},
+            "vitamins": [],
+            "minerals": [],
             "confidence": 0,
         }]
 
-NUTRIENT_LABELS = {"carb": "糖質（炭水化物）", "protein": "タンパク質", "fat": "脂質"}
-NUTRIENT_COLORS = {"carb": "#f39c12", "protein": "#e94560", "fat": "#3498db"}
+NUTRIENT_LABELS = {"carb": "炭水化物", "sugar": "糖質", "protein": "タンパク質", "fat": "脂質", "salt": "塩分"}
+NUTRIENT_COLORS = {"carb": "#f39c12", "sugar": "#e91e8c", "protein": "#e94560", "fat": "#3498db", "salt": "#5A5462"}
 
 def nutrient_status(consumed, ideal):
-    """栄養素の充足率から状態を判定する（不足 / ちょうど良い / 摂りすぎ）"""
+    """『目安まで摂りたい』栄養素（炭水化物・タンパク質・脂質）の状態を判定する"""
     ratio = consumed / ideal * 100 if ideal > 0 else 0
     if ratio < 70:
         return "不足", "#e74c3c", ratio
@@ -445,13 +464,23 @@ def nutrient_status(consumed, ideal):
     else:
         return "摂りすぎ", "#e67e22", ratio
 
+def limit_status(consumed, limit):
+    """『摂りすぎに注意』な栄養素（糖質・塩分）の状態を判定する"""
+    ratio = consumed / limit * 100 if limit > 0 else 0
+    if ratio <= 100:
+        return "良好", "#27ae60", ratio
+    elif ratio <= 130:
+        return "やや多い", "#e67e22", ratio
+    else:
+        return "摂りすぎ", "#e74c3c", ratio
+
 def generate_ai_advice(consumed, required, consumed_nutrients, ideal_nutrients, today_records):
     """1日全体のアドバイス＋次の食事のおすすめ献立＋簡単な作り方をまとめて生成する"""
     meals = [r["name"] for r in today_records if r["type"] == "meal"]
     exercises = [r["name"] for r in today_records if r["type"] == "exercise"]
     remaining = required - consumed
 
-    # 各栄養素の過不足を先に計算し、AIには「何が足りないか」を明示して渡す
+    # 目安まで摂りたい栄養素（炭水化物・タンパク質・脂質）の過不足
     status_lines = []
     for key in ["carb", "protein", "fat"]:
         status, _, ratio = nutrient_status(consumed_nutrients[key], ideal_nutrients[key])
@@ -460,8 +489,19 @@ def generate_ai_advice(consumed, required, consumed_nutrients, ideal_nutrients, 
             f"{NUTRIENT_LABELS[key]}: {consumed_nutrients[key]}g / 目安{ideal_nutrients[key]}g "
             f"（{status}、{'あと'+str(diff)+'g足りない' if diff > 0 else str(-diff)+'g多い' if diff < 0 else '適量'}）"
         )
+    # 摂りすぎに注意したい栄養素（糖質・塩分）の状況
+    for key, unit in [("sugar", "g"), ("salt", "g")]:
+        status, _, ratio = limit_status(consumed_nutrients[key], ideal_nutrients[key])
+        status_lines.append(
+            f"{NUTRIENT_LABELS[key]}: {consumed_nutrients[key]}{unit} / 上限目安{ideal_nutrients[key]}{unit}（{status}）"
+        )
+    # ビタミン・ミネラルは「摂れた種類」で判断
+    vit_list = ", ".join(sorted(set(consumed_nutrients.get("vitamins", [])))) or "特になし"
+    min_list = ", ".join(sorted(set(consumed_nutrients.get("minerals", [])))) or "特になし"
+    status_lines.append(f"今日摂れたビタミン: {vit_list}")
+    status_lines.append(f"今日摂れたミネラル: {min_list}")
 
-    prompt = f"""あなたは栄養管理の専門家です。今日1日の食事内容を分析して、以下の情報を出してください。
+    prompt = f"""あなたは栄養管理の専門家です。今日1日の食事内容を、五大栄養素（タンパク質・脂質・炭水化物・ビタミン・ミネラル）の観点で分析して、以下の情報を出してください。
 
 1日の必要カロリー: {required} kcal
 現在の摂取カロリー: {consumed} kcal（残り {remaining} kcal）
@@ -472,7 +512,7 @@ def generate_ai_advice(consumed, required, consumed_nutrients, ideal_nutrients, 
 {chr(10).join(status_lines)}
 
 出してほしい情報:
-1. advice: 今日全体として何が足りず何が多いかをまとめたアドバイス（120文字程度。1品ごとの感想ではなく全体の話）
+1. advice: 今日全体として何が足りず何が多いかをまとめたアドバイス（120文字程度。1品ごとの感想ではなく全体の話。ビタミン・ミネラルの偏りにも触れる）
 2. menu_name: 不足を補うのに最適な、次の食事のおすすめ献立名（1品。家庭で作りやすいもの）
 3. menu_reason: なぜその献立がおすすめか（50文字程度）
 4. recipe: その料理の簡単な作り方（3〜5ステップの配列。各ステップ40文字以内）
@@ -543,7 +583,7 @@ with st.sidebar:
         ], index=0)
 
     required = calc_required_calories(height, weight, age, gender, activity)
-    ideal = calc_ideal_nutrients(required)
+    ideal = calc_ideal_nutrients(required, gender)
     st.metric("1日の目安カロリー", f"{required} kcal")
 
     if gemini_ready:
@@ -599,7 +639,13 @@ with tab1:
         if r["type"] == "meal" and r["name"] != "認識できませんでした":
             key = r["name"]
             if key not in meal_seen:
-                meal_seen[key] = {"count": 0, "calories": r["calories"], "nutrients": r["nutrients"]}
+                meal_seen[key] = {
+                    "count": 0,
+                    "calories": r["calories"],
+                    "nutrients": r["nutrients"],
+                    "vitamins": r.get("vitamins", []),
+                    "minerals": r.get("minerals", []),
+                }
             meal_seen[key]["count"] += 1
     frequent_meals = sorted(meal_seen.items(), key=lambda x: x[1]["count"], reverse=True)[:3]
 
@@ -617,6 +663,8 @@ with tab1:
                         "name": name,
                         "calories": info["calories"],
                         "nutrients": info["nutrients"],
+                        "vitamins": info["vitamins"],
+                        "minerals": info["minerals"],
                     })
                     st.toast(f"「{name}」を記録しました", icon="✅")
                     persist_log()
@@ -650,6 +698,8 @@ with tab1:
                     "name": d["name"],
                     "calories": d["calories"],
                     "nutrients": d["nutrients"],
+                    "vitamins": d.get("vitamins", []),
+                    "minerals": d.get("minerals", []),
                 })
             persist_log()
 
@@ -659,6 +709,17 @@ with tab1:
 
                 for d in dishes:
                     nut = d["nutrients"]
+                    vit_tags = "".join(
+                        f"<span class='badge' style='background:var(--sunny); color:#2D2A32; margin-right:4px;'>{v}</span>"
+                        for v in d.get("vitamins", [])
+                    )
+                    min_tags = "".join(
+                        f"<span class='badge' style='background:var(--green); margin-right:4px;'>{m}</span>"
+                        for m in d.get("minerals", [])
+                    )
+                    tag_row = ""
+                    if vit_tags or min_tags:
+                        tag_row = f"<div style='margin-top:8px; display:flex; flex-wrap:wrap; gap:4px;'>{vit_tags}{min_tags}</div>"
                     st.markdown(f"""
                     <div class="dish-card">
                         <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -666,13 +727,14 @@ with tab1:
                             <span class="badge" style="background:var(--coral);">{d['calories']} kcal</span>
                         </div>
                         <div style="font-size:12px; color:#8A8494; margin-top:6px; font-weight:500;">
-                            糖質 {nut['carb']}g・タンパク質 {nut['protein']}g・脂質 {nut['fat']}g
+                            炭水化物 {nut['carb']}g（糖質 {nut['sugar']}g）・タンパク質 {nut['protein']}g・脂質 {nut['fat']}g・塩分 {nut['salt']}g
                         </div>
                         <div style="display:flex; align-items:center; gap:8px; margin-top:8px;">
                             <span class="badge" style="background:var(--turquoise);">
                                 確信度 {d['confidence']*100:.0f}%
                             </span>
                         </div>
+                        {tag_row}
                     </div>
                     """, unsafe_allow_html=True)
                 st.caption("💡 1日の栄養バランスは「今日のまとめ」タブでまとめて確認できます")
@@ -730,11 +792,14 @@ with tab3:
     exercise_cal = sum(r["calories"] for r in today_records if r["type"] == "exercise")
     net_cal = meal_cal - exercise_cal
 
-    consumed_nutrients = {"carb": 0, "protein": 0, "fat": 0}
+    consumed_nutrients = {"carb": 0, "sugar": 0, "protein": 0, "fat": 0, "salt": 0.0, "vitamins": [], "minerals": []}
     for r in today_records:
         if r["type"] == "meal" and "nutrients" in r:
-            for k in consumed_nutrients:
+            for k in ["carb", "sugar", "protein", "fat", "salt"]:
                 consumed_nutrients[k] += r["nutrients"].get(k, 0)
+            consumed_nutrients["vitamins"] += r.get("vitamins", [])
+            consumed_nutrients["minerals"] += r.get("minerals", [])
+    consumed_nutrients["salt"] = round(consumed_nutrients["salt"], 1)
 
     ratio = net_cal / required * 100 if required > 0 else 0
 
@@ -798,10 +863,12 @@ with tab3:
     else:
         st.error(f"⚠️ {net_cal - required} kcal オーバーです。運動で消費しましょう。")
 
-    st.subheader("糖質・タンパク質・脂質のバランス")
-    nut_col1, nut_col2, nut_col3 = st.columns(3)
-    nutrient_cols = {"carb": nut_col1, "protein": nut_col2, "fat": nut_col3}
-    for key, col in nutrient_cols.items():
+    st.subheader("🥗 五大栄養素のバランス")
+    st.caption("炭水化物・タンパク質・脂質は「目安まで摂りたい」栄養素、糖質・塩分は「摂りすぎ注意」の栄養素です")
+
+    col_a, col_b, col_c = st.columns(3)
+    main_cols = {"carb": col_a, "protein": col_b, "fat": col_c}
+    for key, col in main_cols.items():
         with col:
             status, color, nratio = nutrient_status(consumed_nutrients[key], ideal[key])
             st.metric(NUTRIENT_LABELS[key], f"{consumed_nutrients[key]}g / {ideal[key]}g")
@@ -810,6 +877,32 @@ with tab3:
                 f"<span class='badge' style='background:{color};'>{status}</span>",
                 unsafe_allow_html=True,
             )
+
+    col_d, col_e = st.columns(2)
+    limit_cols = {"sugar": col_d, "salt": col_e}
+    for key, col in limit_cols.items():
+        with col:
+            status, color, nratio = limit_status(consumed_nutrients[key], ideal[key])
+            unit = "g"
+            st.metric(f"{NUTRIENT_LABELS[key]}（上限目安）", f"{consumed_nutrients[key]}{unit} / {ideal[key]}{unit}")
+            pop_bar(nratio / 100, height=14)
+            st.markdown(
+                f"<span class='badge' style='background:{color};'>{status}</span>",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    vit_set = sorted(set(consumed_nutrients.get("vitamins", [])))
+    min_set = sorted(set(consumed_nutrients.get("minerals", [])))
+    vit_tags = "".join(f"<span class='badge' style='background:var(--sunny); color:#2D2A32; margin:2px;'>{v}</span>" for v in vit_set)
+    min_tags = "".join(f"<span class='badge' style='background:var(--green); margin:2px;'>{m}</span>" for m in min_set)
+    st.markdown(f"""
+    <div class="pop-card" style="background:#FFFFFF;">
+        <div style="font-weight:800; margin-bottom:8px;">🌈 今日摂れたビタミン・ミネラル</div>
+        <div style="margin-bottom:4px;">{vit_tags if vit_tags else "<span style='color:#8A8494; font-size:13px;'>まだ記録がありません</span>"}</div>
+        <div>{min_tags}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
     st.subheader("今日の記録")
     if today_records:
