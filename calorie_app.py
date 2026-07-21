@@ -454,13 +454,32 @@ def draw_plate_boxes(img_bgr: np.ndarray, regions: list) -> np.ndarray:
 
 def get_plate_crop_and_mask(img_bgr: np.ndarray, region: dict):
     x, y, w, h = region["bbox"]
-    crop = img_bgr[y:y + h, x:x + w].copy()
+    h_img, w_img = img_bgr.shape[:2]
+
+    # --- 🔥 マージン（余白）を追加 ---
+    margin_ratio = 0.25  # 上下左右に25%余白を持たせる
+    margin_w = int(w * margin_ratio)
+    margin_h = int(h * margin_ratio)
+
+    # 画像外にはみ出さないよう座標を調整
+    x_min = max(0, x - margin_w)
+    y_min = max(0, y - margin_h)
+    x_max = min(w_img, x + w + margin_w)
+    y_max = min(h_img, y + h + margin_h)
+
+    # 余白を含めた切り出し
+    crop = img_bgr[y_min:y_max, x_min:x_max].copy()
+
+    # マスクの作成（拡張したクロップ画像に合わせてサイズ調整）
+    crop_h, crop_w = crop.shape[:2]
     if region.get("contour") is not None:
-        mask = np.zeros((h, w), dtype=np.uint8)
-        shifted_contour = region["contour"] - np.array([x, y])
+        mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
+        # コンターのオフセット位置を新しい左上(x_min, y_min)基準に修正
+        shifted_contour = region["contour"] - np.array([x_min, y_min])
         cv2.drawContours(mask, [shifted_contour], -1, 255, thickness=-1)
     else:
-        mask = np.full((h, w), 255, dtype=np.uint8)
+        mask = np.full((crop_h, crop_w), 255, dtype=np.uint8)
+
     return crop, mask
 
 def analyze_plate_colors(crop_bgr: np.ndarray, mask: np.ndarray) -> dict:
