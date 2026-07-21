@@ -397,33 +397,48 @@ def apply_clahe(img_bgr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
 
 
-def detect_plate_regions(img_bgr: np.ndarray, low: int = 50, high: int = 150, min_ratio: float = 0.02, max_ratio: float = 0.45, max_regions: int = 10):
-    """Canny + findContours でお皿・料理領域を検出"""
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, low, high)
-    # つなげる処理は控えめに（強すぎると複数の皿がまとめて1つの塊になってしまう）
-    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+def detect_plates_gemini(pil_image: Image.Image) -> list:
+    """Geminiにお皿・料理ごとの領域（バウンディングボックス）を検出させる"""
+    prompt = """この画像に写っている「お皿・器ごとの領域」をすべて検出してください。
 
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+ルール：
+- トレイや食卓全体をひとまとめにせず、器・お皿の単位で個別に分けてください
+- 同じお皿の上に複数の料理が乗っていて、視覚的に分かれている場合は別領域にしてください
+- 箸・コップ・調味料入れなど、食べ物が乗っていない物は含めないでください
 
-    h, w = img_bgr.shape[:2]
-    frame_area = h * w
-    min_area = frame_area * min_ratio
-    max_area = frame_area * max_ratio
+出力は必ず次のJSON配列形式のみとし、他の説明文やMarkdown記法は一切含めないでください。
+座標は画像サイズに対して0〜1000に正規化した [ymin, xmin, ymax, xmax] 形式です。
 
-    regions = []
-    for c in contours:
-        area = cv2.contourArea(c)
-        # 画像全体に近いサイズの塊は「複数の皿が結合してしまった誤検出」とみなして除外
-        if area < min_area or area > max_area:
-            continue
-        x, y, bw, bh = cv2.boundingRect(c)
-        regions.append({"contour": c, "bbox": (x, y, bw, bh), "area": area})
+[
+  {"label": "推定される料理名（簡潔に）", "box_2d": [ymin, xmin, ymax, xmax]}
+]"""
+    try:
+        model = genai.GenerativeModel("models/gemini-2.5-flash-lite")
+        response = model.generate_content([prompt, pil_image])
+        text = response.text.strip()
+        text = re.sub(r'^```json|```$', '', text, flags=re.MULTILINE).strip()
+        boxes = json.loads(text)
 
-    regions.sort(key=lambda r: r["area"], reverse=True)
-    return regions[:max_regions]
+        w, h = pil_image.size
+        regions = []
+        for b in boxes:
+            y1, x1, y2, x2 = b["box_2d"]
+            x1p = max(int(x1 / 1000 * w), 0)
+            y1p = max(int(y1 / 1000 * h), 0)
+            x2p = min(int(x2 / 1000 * w), w)
+            y2p = min(int(y2 / 1000 * h), h)
+            bw = max(x2p - x1p, 1)
+            bh = max(y2p - y1p, 1)
+            regions.append({
+                "bbox": (x1p, y1p, bw, bh),
+                "area": bw * bh,
+                "label": b.get("label", ""),
+                "contour": None,
+            })
+        return regions
+    except Exception as e:
+        st.warning(f"Geminiによるお皿検出でエラーが発生しました: {e}")
+        return []
 
 
 def draw_plate_boxes(img_bgr: np.ndarray, regions: list) -> np.ndarray:
@@ -441,12 +456,16 @@ def draw_plate_boxes(img_bgr: np.ndarray, regions: list) -> np.ndarray:
 
 
 def get_plate_crop_and_mask(img_bgr: np.ndarray, region: dict):
-    """バウンディングボックスで切り抜き、輪郭内部のマスクを作成"""
+    """バウンディングボックスで切り抜き、可能であれば輪郭内部のマスクを作成"""
     x, y, w, h = region["bbox"]
     crop = img_bgr[y:y + h, x:x + w].copy()
-    mask = np.zeros((h, w), dtype=np.uint8)
-    shifted_contour = region["contour"] - np.array([x, y])
-    cv2.drawContours(mask, [shifted_contour], -1, 255, thickness=-1)
+    if region.get("contour") is not None:
+        mask = np.zeros((h, w), dtype=np.uint8)
+        shifted_contour = region["contour"] - np.array([x, y])
+        cv2.drawContours(mask, [shifted_contour], -1, 255, thickness=-1)
+    else:
+        # Geminiの矩形検出には輪郭情報が無いため、矩形全体をマスクとして色彩・面積解析に使う
+        mask = np.full((h, w), 255, dtype=np.uint8)
     return crop, mask
 
 
@@ -775,16 +794,6 @@ with tab1:
     st.subheader("料理写真をアップロードして記録")
     uploaded_file = st.file_uploader("写真を選ぶ", type=["jpg", "jpeg", "png", "webp"])
 
-    with st.expander("🔧 お皿の検出設定（うまく検出できない場合はここを調整）"):
-        det_col1, det_col2 = st.columns(2)
-        with det_col1:
-            canny_low = st.slider("エッジ検出の下限", 10, 150, 50, 5, key="canny_low")
-            min_ratio = st.slider("検出する最小サイズ（画像全体に対する割合）", 0.005, 0.15, 0.02, 0.005, key="min_ratio")
-        with det_col2:
-            canny_high = st.slider("エッジ検出の上限", 50, 300, 150, 5, key="canny_high")
-            max_ratio = st.slider("検出する最大サイズ（大きすぎる塊を除外）", 0.2, 0.9, 0.45, 0.05, key="max_ratio")
-        st.caption("💡 複数のお皿が1つの塊として検出される場合は「最大サイズ」を下げてください。逆にお皿が検出されない場合は「最小サイズ」を下げてみてください。")
-
     analyze_targets = []
 
     if uploaded_file:
@@ -794,9 +803,23 @@ with tab1:
 
         # ① CLAHEで前処理（暗所・影対策のコントラスト補正）
         clahe_bgr = apply_clahe(img_bgr)
+        clahe_pil = Image.fromarray(cv2.cvtColor(clahe_bgr, cv2.COLOR_BGR2RGB))
 
-        # ② Canny + findContours でお皿・料理領域を自動検出
-        regions = detect_plate_regions(clahe_bgr, low=canny_low, high=canny_high, min_ratio=min_ratio, max_ratio=max_ratio)
+        # ② お皿・料理領域の検出はGeminiに任せる（同じ写真での再実行はキャッシュして無駄なAPI呼び出しを防ぐ）
+        file_key = f"{uploaded_file.name}_{uploaded_file.size}"
+        cache_key = f"detected_regions_{file_key}"
+
+        if not gemini_ready:
+            st.warning("お皿の自動検出にはAPIキーが必要です。サイドバーから設定してください。")
+        elif cache_key not in st.session_state:
+            with st.spinner("🤖 Geminiがお皿の位置を検出中..."):
+                st.session_state[cache_key] = detect_plates_gemini(clahe_pil)
+
+        regions = st.session_state.get(cache_key, [])
+
+        if st.button("🔄 お皿の検出をやり直す"):
+            st.session_state.pop(cache_key, None)
+            st.rerun()
 
         if regions:
             boxed_bgr = draw_plate_boxes(clahe_bgr, regions)
@@ -811,6 +834,7 @@ with tab1:
             cols = st.columns(n_cols)
             for i, region in enumerate(regions):
                 crop_bgr, mask = get_plate_crop_and_mask(clahe_bgr, region)
+
                 crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
                 with cols[i % n_cols]:
                     st.image(crop_rgb, caption=f"#{i + 1}", use_container_width=True)
