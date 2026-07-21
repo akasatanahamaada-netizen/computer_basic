@@ -385,70 +385,79 @@ def apply_clahe(img_bgr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
 
 def detect_plates_opencv(img_bgr: np.ndarray) -> list:
-    """ウォーターシェッド（cv2.watershed）を使って密着したお皿を分離抽出する"""
+    """料理（色彩・コントラスト）の領域を検出し、マージンを広げてお皿枠を作る"""
     h_img, w_img = img_bgr.shape[:2]
     img_area = h_img * w_img
 
-    # 1. グレースケール化とノイズ除去
+    # 1. グレースケール化と平滑化
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.medianBlur(gray, 9)
+    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
 
-    # 2. 二値化（大津の二値化＋適応的二値化のブレンド）
-    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # 2. 彩度（Saturation）情報を抽出（木目背景は色が薄く、料理は色彩が豊かなため）
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    sat = hsv[:, :, 1] # Sチャンネル（彩度）
 
-    # ノイズ除去（オープニング処理）
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
+    # 3. 輝度変化（エッジ）と彩度のハイブリッド二値化
+    grad_x = cv2.Sobel(blurred, cv2.CV_16S, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(blurred, cv2.CV_16S, 0, 1, ksize=3)
+    abs_grad = cv2.addWeighted(cv2.convertScaleAbs(grad_x), 0.5, cv2.convertScaleAbs(grad_y), 0.5, 0)
+    
+    # 彩度とエッジを合成して料理の存在感（フィーチャーマップ）を作る
+    combined = cv2.addWeighted(abs_grad, 0.6, sat, 0.4, 0)
 
-    # 3. 確実に背景である領域（Sure Background）の抽出
-    sure_bg = cv2.dilate(opening, kernel, iterations=3)
+    # 大津の二値化で料理領域を特定
+    _, thresh = cv2.threshold(combined, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # 4. 確実に前景（お皿/料理の中心）である領域（Sure Foreground）の抽出
-    # 距離変換を使って「中心から遠いところ＝お皿の真ん中」をシードにする
-    dist_transform = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
-    _, sure_fg = cv2.threshold(dist_transform, 0.25 * dist_transform.max(), 255, 0)
-    sure_fg = np.uint8(sure_fg)
+    # 4. 料理の細かい具材を結合（クロージング処理）
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    morphed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=3)
 
-    # 5. 未確定領域（Unknown）の特定（背景 - 前景）
-    unknown = cv2.subtract(sure_bg, sure_fg)
+    # 5. 輪郭抽出
+    contours, _ = cv2.findContours(morphed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # 6. マーキング（シード付け）
-    num_labels, markers = cv2.connectedComponents(sure_fg)
-    # 背景を1、未確定領域を0にするために+1
-    markers = markers + 1
-    markers[unknown == 255] = 0
-
-    # 7. ウォーターシェッド実行！
-    markers = cv2.watershed(img_bgr, markers)
-
-    # 8. 分割された各マーカー（お皿）からバウンディングボックスを取得
     regions = []
-    for label in range(2, num_labels + 1):  # 1は背景なので2から開始
-        # 各ラベルのマスクを作成
-        mask = np.uint8(markers == label)
-        
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            continue
-            
-        cnt = contours[0]
+    for cnt in contours:
         area = cv2.contourArea(cnt)
 
-        # 面積フィルタ（ノイズ除外＆極端に巨大な枠を除外）
-        if img_area * 0.015 < area < img_area * 0.75:
+        # 小さすぎるノイズや巨大すぎる画面全体を除外
+        if img_area * 0.01 < area < img_area * 0.60:
             x, y, w, h = cv2.boundingRect(cnt)
-            aspect_ratio = float(w) / h
-            if 0.35 < aspect_ratio < 2.8:
+
+            # --- 🔥 マージン拡張（お皿全体が入るように枠を外側に30%広げる）---
+            margin_w = int(w * 0.25)
+            margin_h = int(h * 0.25)
+            x_new = max(0, x - margin_w)
+            y_new = max(0, y - margin_h)
+            w_new = min(w_img - x_new, w + margin_w * 2)
+            h_new = min(h_img - y_new, h + margin_h * 2)
+
+            aspect_ratio = float(w_new) / h_new
+            if 0.3 < aspect_ratio < 3.0:
                 regions.append({
-                    "bbox": (x, y, w, h),
-                    "area": int(area),
+                    "bbox": (x_new, y_new, w_new, h_new),
+                    "area": int(w_new * h_new),
                     "label": "お皿",
                     "contour": cnt,
                 })
 
     # 面積順にソート
     regions = sorted(regions, key=lambda r: r["area"], reverse=True)
-    return regions
+
+    # 重なりすぎている枠の除去（NMS）
+    filtered_regions = []
+    for r in regions:
+        rx, ry, rw, rh = r["bbox"]
+        overlap = False
+        for fr in filtered_regions:
+            fx, fy, fw, fh = fr["bbox"]
+            # 重なり判定（中心点が被っているか）
+            if fx <= rx + rw // 2 <= fx + fw and fy <= ry + rh // 2 <= fy + fh:
+                overlap = True
+                break
+        if not overlap:
+            filtered_regions.append(r)
+
+    return filtered_regions
 
 def draw_plate_boxes(img_bgr: np.ndarray, regions: list) -> np.ndarray:
     out = img_bgr.copy()
