@@ -4,5 +4,3 @@ Pillow
 pandas
 altair
 requests
-opencv-python-headless
-numpy
