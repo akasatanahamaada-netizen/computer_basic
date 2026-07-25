@@ -3,6 +3,7 @@ import google.generativeai as genai
 import requests
 from PIL import Image, ImageEnhance
 import numpy as np
+import cv2
 import json
 import re
 import os
@@ -572,6 +573,88 @@ def generate_instagram_photo(image, style="natural"):
         return ImageEnhance.Color(base).enhance(1.15)
     return image
 
+# ================================================================
+# 【自作のCV処理】お皿の検出（Hough変換による円検出）
+# ----------------------------------------------------------------
+# 授業でいう「形を見つける」の代表例。お皿は真上から見るとほぼ円形になる
+# ことを利用し、Hough変換で円を検出して、お皿の内側だけを残して
+# 背景をモザイク化する。
+# ================================================================
+
+def detect_plate_circle(image):
+    """Hough変換（円検出）でお皿の位置・半径を推定する"""
+    arr = np.asarray(image.convert("RGB"))
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    gray = cv2.medianBlur(gray, 7)  # ノイズを減らして誤検出を防ぐ
+    h, w = gray.shape
+    min_r = int(min(h, w) * 0.25)
+    max_r = int(min(h, w) * 0.48)
+    circles = cv2.HoughCircles(
+        gray, cv2.HOUGH_GRADIENT, dp=1.2, minDist=min(h, w),
+        param1=80, param2=40, minRadius=min_r, maxRadius=max_r
+    )
+    if circles is not None and len(circles[0]) > 0:
+        # 複数候補がある場合は、画像中心に最も近い円をお皿とみなす
+        cx0, cy0 = w / 2, h / 2
+        best = min(circles[0], key=lambda c: (c[0] - cx0) ** 2 + (c[1] - cy0) ** 2)
+        return int(best[0]), int(best[1]), int(best[2])
+    return None
+
+def mosaic_background_outside_plate(image, block=18):
+    """お皿の外側だけをモザイク化する（お皿の内側＝料理はそのまま残す）"""
+    image = image.convert("RGB")
+    arr = np.array(image)
+    h, w = arr.shape[:2]
+
+    result = detect_plate_circle(image)
+    if result is None:
+        # 円が検出できない場合は、画像中央を円形とみなすフォールバック
+        cx, cy, r = w // 2, h // 2, int(min(h, w) * 0.42)
+        detected = False
+    else:
+        cx, cy, r = result
+        detected = True
+
+    mosaic_full = np.array(pixelate(image, block=block))
+    y_idx, x_idx = np.ogrid[:h, :w]
+    dist = np.sqrt((x_idx - cx) ** 2 + (y_idx - cy) ** 2)
+    mask = dist <= r  # True = お皿の内側
+    out = np.where(mask[..., None], arr, mosaic_full)
+    return Image.fromarray(out.astype(np.uint8)), detected
+
+# ================================================================
+# 【CV処理】人物の顔検出（Haar Cascade / Viola-Jones法）とモザイク
+# ----------------------------------------------------------------
+# 料理写真に人が写り込んでいた場合、プライバシー保護のため顔だけを
+# モザイク化する。OpenCV付属のHaar Cascade分類器を利用した古典的な
+# 物体検出（特徴量ベース）。
+# ================================================================
+
+_FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+
+def detect_faces(image):
+    """Haar Cascadeで画像内の顔を検出し、(x, y, w, h) のリストを返す"""
+    arr = np.asarray(image.convert("RGB"))
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    faces = _FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(35, 35))
+    return faces
+
+def mosaic_faces(image):
+    """検出した顔の領域だけをモザイク化する（プライバシー保護）"""
+    image = image.convert("RGB")
+    faces = detect_faces(image)
+    arr = np.array(image)
+    for (x, y, fw, fh) in faces:
+        pad = int(0.15 * fw)  # 顔の輪郭全体を覆うよう少し余裕を持たせる
+        x0, y0 = max(0, x - pad), max(0, y - pad)
+        x1, y1 = min(image.width, x + fw + pad), min(image.height, y + fh + pad)
+        region = arr[y0:y1, x0:x1]
+        if region.size == 0:
+            continue
+        pixelated = np.array(pixelate(Image.fromarray(region), block=max(6, fw // 8)))
+        arr[y0:y1, x0:x1] = pixelated
+    return Image.fromarray(arr), len(faces)
+
 def estimate_calories_gemini(image):
     prompt = """この写真に写っている料理をすべて認識してください。
 カロリーや栄養素は、写真に写っている実際の量に基づいて推定してください。
@@ -994,8 +1077,9 @@ with tab1:
     if st.session_state.get("_last_uploaded_image") is not None:
         st.divider()
         st.markdown("**📸 この写真をSNS投稿用に加工する**")
-        st.caption("AIは使わず、明るさ補正・彩度強調・モザイク化などの画像処理をすべて自分のコードで行っています")
+        st.caption("AIは使わず、画像処理・古典的なCVアルゴリズムをすべて自分のコードで実装しています")
 
+        st.markdown("フィルター")
         style_labels = {"natural": "✨ 自然補正", "vignette": "🌅 ビネット風", "mosaic": "🧩 モザイク風"}
         style_cols = st.columns(3)
         for i, (style_key, label) in enumerate(style_labels.items()):
@@ -1003,16 +1087,41 @@ with tab1:
                 if st.button(label, key=f"style_{style_key}", use_container_width=True):
                     st.session_state["_photo_style"] = style_key
 
+        st.markdown("検出して加工")
+        detect_cols = st.columns(2)
+        with detect_cols[0]:
+            if st.button("🍽️ お皿だけ残して背景モザイク", key="style_plate", use_container_width=True):
+                st.session_state["_photo_style"] = "plate"
+        with detect_cols[1]:
+            if st.button("🙈 人の顔だけモザイク", key="style_face", use_container_width=True):
+                st.session_state["_photo_style"] = "face"
+
         chosen_style = st.session_state.get("_photo_style")
         if chosen_style:
             src_img = st.session_state["_last_uploaded_image"]
-            edited = generate_instagram_photo(src_img, chosen_style)
+            detect_note = None
+
+            if chosen_style == "plate":
+                with st.spinner("🔍 Hough変換でお皿の形（円）を検出中..."):
+                    edited, plate_detected = mosaic_background_outside_plate(src_img)
+                caption = "加工後（お皿の外側をモザイク化）"
+                detect_note = "✅ 円形のお皿を検出しました" if plate_detected else "⚠️ お皿の形を検出できず、中央を基準にモザイク化しました"
+            elif chosen_style == "face":
+                with st.spinner("🔍 Haar Cascadeで顔を検出中..."):
+                    edited, n_faces = mosaic_faces(src_img)
+                caption = "加工後（顔をモザイク化）"
+                detect_note = f"✅ {n_faces}件の顔を検出してモザイク化しました" if n_faces > 0 else "人の顔は検出されませんでした（そのままの写真です）"
+            else:
+                edited = generate_instagram_photo(src_img, chosen_style)
+                caption = f"加工後（{style_labels[chosen_style]}）"
 
             edit_col1, edit_col2 = st.columns(2)
             with edit_col1:
                 st.image(src_img, caption="元の写真", use_container_width=True)
             with edit_col2:
-                st.image(edited, caption=f"加工後（{style_labels[chosen_style]}）", use_container_width=True)
+                st.image(edited, caption=caption, use_container_width=True)
+            if detect_note:
+                st.caption(detect_note)
 
             buf = io.BytesIO()
             edited.save(buf, format="JPEG", quality=92)
