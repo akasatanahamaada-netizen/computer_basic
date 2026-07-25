@@ -630,7 +630,8 @@ def mosaic_background_outside_plate(image, block=18):
 # 物体検出（特徴量ベース）。
 # ================================================================
 
-_FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+_HAAR_PATH = os.path.join(os.path.dirname(cv2.__file__), "data", "haarcascade_frontalface_default.xml")
+_FACE_CASCADE = cv2.CascadeClassifier(_HAAR_PATH)
 
 def detect_faces(image):
     """Haar Cascadeで画像内の顔を検出し、(x, y, w, h) のリストを返す"""
