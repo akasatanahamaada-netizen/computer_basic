@@ -582,31 +582,79 @@ def generate_instagram_photo(image, style="natural"):
     return image
 
 # ================================================================
-# 【自作のCV処理】お皿の検出（Hough変換による円検出）
+# 【自作のCV処理】お皿の検出（色によるセグメンテーション＋Hough変換）
 # ----------------------------------------------------------------
-# 授業でいう「形を見つける」の代表例。お皿は真上から見るとほぼ円形になる
-# ことを利用し、Hough変換で円を検出して、お皿の内側だけを残して
-# 背景をモザイク化する。
+# 授業でいう「形を見つける」「色を調べる」の複合例。
+# 斜め構図で撮影されるとお皿は楕円に写るため、真円検出（Hough変換）
+# だけでは検出できないことがある。そこで、
+#   ①まず「明るく彩度の低い(白っぽい)領域」をHSVで抽出し、
+#     最大の連結領域をお皿の輪郭（楕円）とみなす
+#   ②見つからなければHough変換（真円）を試す
+#   ③それでも失敗したら、顔が写りやすい上部を避けた
+#     控えめな楕円をフォールバックとして使う
 # ================================================================
 
-def detect_plate_circle(image):
-    """Hough変換（円検出）でお皿の位置・半径を推定する"""
+def detect_plate_region(image):
+    """お皿らしい領域を検出し、(中心x, 中心y, 横半径, 縦半径, 検出方法) を返す"""
     arr = np.asarray(image.convert("RGB"))
+    h, w = arr.shape[:2]
+    hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
+    sat = hsv[:, :, 1].astype(np.float32) / 255.0
+    val = hsv[:, :, 2].astype(np.float32) / 255.0
+
+    # ---- ① 白っぽい（明るく彩度が低い）領域を抽出 ----
+    white_mask = ((val > 0.60) & (sat < 0.22)).astype(np.uint8) * 255
+    white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+
+    # 料理がお皿の中央にあるとリング状（穴あき）になるため、輪郭を塗りつぶして
+    # お皿全体を1つの塊として扱えるようにする
+    contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    filled = np.zeros_like(white_mask)
+    if contours:
+        cv2.drawContours(filled, contours, -1, 255, thickness=cv2.FILLED)
+
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(filled, connectivity=8)
+    best = None
+    img_area = h * w
+    for i in range(1, num_labels):
+        area = stats[i, cv2.CC_STAT_AREA]
+        x, y, bw, bh = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+        area_ratio = area / img_area
+        touches_edge = x <= 1 or y <= 1 or (x + bw) >= w - 1 or (y + bh) >= h - 1
+        aspect = bw / max(bh, 1)
+        fill_ratio = area / max(bw * bh, 1)  # 楕円らしい塗りつぶし率かどうか
+        if (0.04 <= area_ratio <= 0.55 and not touches_edge
+                and 0.65 <= aspect <= 3.4 and fill_ratio >= 0.6):
+            if best is None or area > best[0]:
+                best = (area, i)
+
+    if best is not None:
+        i = best[1]
+        x, y, bw, bh = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+        cx, cy = x + bw / 2, y + bh / 2
+        rx, ry = bw / 2 * 1.12, bh / 2 * 1.12  # 少し余裕を持たせる
+        return cx, cy, rx, ry, "color"
+
+    # ---- ② Hough変換（真円）を試す ----
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
-    gray = cv2.medianBlur(gray, 7)  # ノイズを減らして誤検出を防ぐ
-    h, w = gray.shape
-    min_r = int(min(h, w) * 0.25)
-    max_r = int(min(h, w) * 0.48)
+    gray_blur = cv2.medianBlur(gray, 7)
+    min_r = int(min(h, w) * 0.2)
+    max_r = int(min(h, w) * 0.45)
     circles = cv2.HoughCircles(
-        gray, cv2.HOUGH_GRADIENT, dp=1.2, minDist=min(h, w),
-        param1=80, param2=40, minRadius=min_r, maxRadius=max_r
+        gray_blur, cv2.HOUGH_GRADIENT, dp=1.2, minDist=min(h, w),
+        param1=80, param2=45, minRadius=min_r, maxRadius=max_r
     )
     if circles is not None and len(circles[0]) > 0:
-        # 複数候補がある場合は、画像中心に最も近い円をお皿とみなす
-        cx0, cy0 = w / 2, h / 2
-        best = min(circles[0], key=lambda c: (c[0] - cx0) ** 2 + (c[1] - cy0) ** 2)
-        return int(best[0]), int(best[1]), int(best[2])
-    return None
+        # 料理写真は下寄りに皿があることが多いので、そこに近い円を優先
+        cx0, cy0 = w / 2, h * 0.6
+        best_c = min(circles[0], key=lambda c: (c[0] - cx0) ** 2 + (c[1] - cy0) ** 2)
+        return float(best_c[0]), float(best_c[1]), float(best_c[2]), float(best_c[2]), "hough"
+
+    # ---- ③ 最終フォールバック：顔が写りやすい上部を避けた控えめな楕円 ----
+    cx, cy = w / 2, h * 0.62
+    rx, ry = w * 0.30, h * 0.24
+    return cx, cy, rx, ry, "fallback"
 
 def mosaic_background_outside_plate(image, block=18):
     """お皿の外側だけをモザイク化する（お皿の内側＝料理はそのまま残す）"""
@@ -614,19 +662,13 @@ def mosaic_background_outside_plate(image, block=18):
     arr = np.array(image)
     h, w = arr.shape[:2]
 
-    result = detect_plate_circle(image)
-    if result is None:
-        # 円が検出できない場合は、画像中央を円形とみなすフォールバック
-        cx, cy, r = w // 2, h // 2, int(min(h, w) * 0.42)
-        detected = False
-    else:
-        cx, cy, r = result
-        detected = True
+    cx, cy, rx, ry, method = detect_plate_region(image)
+    detected = method != "fallback"
 
     mosaic_full = np.array(pixelate(image, block=block))
     y_idx, x_idx = np.ogrid[:h, :w]
-    dist = np.sqrt((x_idx - cx) ** 2 + (y_idx - cy) ** 2)
-    mask = dist <= r  # True = お皿の内側
+    norm_dist = ((x_idx - cx) / rx) ** 2 + ((y_idx - cy) / ry) ** 2
+    mask = norm_dist <= 1.0  # True = お皿の内側（楕円マスク）
     out = np.where(mask[..., None], arr, mosaic_full)
     return Image.fromarray(out.astype(np.uint8)), detected
 
