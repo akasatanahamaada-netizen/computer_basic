@@ -524,9 +524,9 @@ def missing_color_advice(present_colors):
 # ----------------------------------------------------------------
 # Gemini APIを使わず、PIL＋numpyだけで完結する古典的な画像処理。
 # 授業スライドの「画像を変換：明るさ補正・ぼかし・モザイク・フィルタ」に対応。
-#   ・自然補正：ヒストグラムの平均輝度から自動で明るさ／コントラストを補正
-#   ・ビネット：中心からの距離に応じて周辺を減光する放射状マスクを自作
-#   ・モザイク：縮小→最近傍補間で拡大するブロック平均化（古典的なピクセル化処理）
+#   ・低彩度・暖色寄り：彩度を落として赤みを足し、しっとり落ち着いた色調に
+#   ・自然な彩度高め：明るさ・コントラストを自動補正し、彩度とシャープネスを強調
+#   ・青み削り：青チャンネルを抑えて、蛍光灯などで生じる青被りを補正する
 # ================================================================
 
 def auto_brightness_contrast(arr):
@@ -540,17 +540,6 @@ def auto_brightness_contrast(arr):
     arr = (arr - 128) * 1.12 + 128  # コントラストを軽く強調
     return np.clip(arr, 0, 255)
 
-def apply_vignette(arr):
-    """中心からの距離に応じて周辺を暗くする、放射状マスクを自作して適用する"""
-    h, w = arr.shape[:2]
-    y, x = np.ogrid[:h, :w]
-    cx, cy = w / 2, h / 2
-    dist = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
-    max_dist = np.sqrt(cx ** 2 + cy ** 2)
-    mask = 1 - 0.45 * (dist / max_dist) ** 2
-    mask = np.clip(mask, 0.4, 1.0)
-    return arr * mask[..., None]
-
 def pixelate(image, block=16):
     """縮小してから最近傍補間で拡大し、モザイク（ピクセル化）を作る"""
     w, h = image.size
@@ -562,23 +551,36 @@ def generate_instagram_photo(image, style="natural"):
     image = image.convert("RGB")
     arr = np.asarray(image).astype(np.float32)
 
-    if style == "natural":
+    if style == "muted_warm":
+        # ---- 低彩度・暖色寄り：しっとり落ち着いたトーン ----
         arr = auto_brightness_contrast(arr)
+        # R(赤)を上げてB(青)を下げ、暖色方向に色温度をシフトさせる
+        arr[:, :, 0] = np.clip(arr[:, :, 0] * 1.06, 0, 255)
+        arr[:, :, 2] = np.clip(arr[:, :, 2] * 0.90, 0, 255)
         out = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
-        out = ImageEnhance.Color(out).enhance(1.25)
-        out = ImageEnhance.Sharpness(out).enhance(1.3)
+        out = ImageEnhance.Color(out).enhance(0.78)  # 彩度を落として落ち着いた印象に
+        out = ImageEnhance.Contrast(out).enhance(1.05)
         return out
-    elif style == "vignette":
+
+    elif style == "natural_vivid":
+        # ---- 自然な彩度高め：くっきり鮮やかに ----
         arr = auto_brightness_contrast(arr)
-        arr = apply_vignette(arr)
         out = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
-        out = ImageEnhance.Color(out).enhance(1.35)
-        r, g, b = out.split()
-        r = r.point(lambda p: min(255, int(p * 1.08)))  # 赤みを足して暖色系に
-        return Image.merge("RGB", (r, g, b))
-    elif style == "mosaic":
-        base = pixelate(image, block=16)
-        return ImageEnhance.Color(base).enhance(1.15)
+        out = ImageEnhance.Color(out).enhance(1.4)
+        out = ImageEnhance.Sharpness(out).enhance(1.35)
+        out = ImageEnhance.Contrast(out).enhance(1.08)
+        return out
+
+    elif style == "reduce_blue":
+        # ---- 青み削り：蛍光灯などによる青被りを補正 ----
+        arr = auto_brightness_contrast(arr)
+        # 青チャンネルだけを抑え、赤・緑はそのまま（明るさの帳尻を軽く合わせる）
+        arr[:, :, 2] = np.clip(arr[:, :, 2] * 0.80, 0, 255)
+        arr[:, :, 0] = np.clip(arr[:, :, 0] * 1.03, 0, 255)
+        out = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+        out = ImageEnhance.Color(out).enhance(1.15)
+        return out
+
     return image
 
 # ================================================================
@@ -713,8 +715,9 @@ def detect_faces(image):
     faces = _FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(35, 35))
     return faces
 
-def mosaic_faces(image):
-    """検出した顔の領域だけをモザイク化する（プライバシー保護）"""
+def mosaic_faces(image, block_divisor=8):
+    """検出した顔の領域だけをモザイク化する（プライバシー保護）
+    block_divisor が小さいほどブロックが大きくなり、粗いモザイクになる"""
     image = image.convert("RGB")
     faces = detect_faces(image)
     arr = np.array(image)
@@ -725,7 +728,7 @@ def mosaic_faces(image):
         region = arr[y0:y1, x0:x1]
         if region.size == 0:
             continue
-        pixelated = np.array(pixelate(Image.fromarray(region), block=max(6, fw // 8)))
+        pixelated = np.array(pixelate(Image.fromarray(region), block=max(4, fw // block_divisor)))
         arr[y0:y1, x0:x1] = pixelated
     return Image.fromarray(arr), len(faces)
 
@@ -1139,7 +1142,11 @@ with tab1:
         st.caption("AIは使わず、画像処理・古典的なCVアルゴリズムをすべて自分のコードで実装しています")
 
         st.markdown("フィルター")
-        style_labels = {"natural": "✨ 自然補正", "vignette": "🌅 ビネット風", "mosaic": "🧩 モザイク風"}
+        style_labels = {
+            "muted_warm": "🍂 低彩度・暖色寄り",
+            "natural_vivid": "🌿 自然な彩度高め",
+            "reduce_blue": "🔥 青み削り",
+        }
         style_cols = st.columns(3)
         for i, (style_key, label) in enumerate(style_labels.items()):
             with style_cols[i]:
@@ -1153,6 +1160,12 @@ with tab1:
                 "「お皿検出」「顔検出」機能は現在使用できません。フィルターは通常通り使えます。"
             )
         else:
+            mosaic_grain = st.radio(
+                "モザイクの粗さ", ["🔲 荒め", "🔳 細かめ"],
+                horizontal=True, key="mosaic_grain",
+            )
+            is_coarse = mosaic_grain == "🔲 荒め"
+
             detect_cols = st.columns(2)
             with detect_cols[0]:
                 if st.button("🍽️ お皿だけ残して背景モザイク", key="style_plate", use_container_width=True):
@@ -1170,13 +1183,15 @@ with tab1:
             detect_note = None
 
             if chosen_style == "plate":
+                plate_block = 26 if is_coarse else 10
                 with st.spinner("🔍 Hough変換でお皿の形（円）を検出中..."):
-                    edited, plate_detected = mosaic_background_outside_plate(src_img)
+                    edited, plate_detected = mosaic_background_outside_plate(src_img, block=plate_block)
                 caption = "加工後（お皿の外側をモザイク化）"
                 detect_note = "✅ 円形のお皿を検出しました" if plate_detected else "⚠️ お皿の形を検出できず、中央を基準にモザイク化しました"
             elif chosen_style == "face":
+                face_divisor = 4 if is_coarse else 14
                 with st.spinner("🔍 Haar Cascadeで顔を検出中..."):
-                    edited, n_faces = mosaic_faces(src_img)
+                    edited, n_faces = mosaic_faces(src_img, block_divisor=face_divisor)
                 caption = "加工後（顔をモザイク化）"
                 detect_note = f"✅ {n_faces}件の顔を検出してモザイク化しました" if n_faces > 0 else "人の顔は検出されませんでした（そのままの写真です）"
             else:
