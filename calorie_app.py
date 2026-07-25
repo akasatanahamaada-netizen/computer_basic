@@ -1,7 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
 import requests
-from PIL import Image
+from PIL import Image, ImageEnhance
 import numpy as np
 import json
 import re
@@ -510,6 +510,68 @@ def missing_color_advice(present_colors):
     }
     return "、".join(tips[m] for m in missing[:3])
 
+# ================================================================
+# 【自作のCV処理】インスタ映え加工（画像変換）
+# ----------------------------------------------------------------
+# Gemini APIを使わず、PIL＋numpyだけで完結する古典的な画像処理。
+# 授業スライドの「画像を変換：明るさ補正・ぼかし・モザイク・フィルタ」に対応。
+#   ・自然補正：ヒストグラムの平均輝度から自動で明るさ／コントラストを補正
+#   ・ビネット：中心からの距離に応じて周辺を減光する放射状マスクを自作
+#   ・モザイク：縮小→最近傍補間で拡大するブロック平均化（古典的なピクセル化処理）
+# ================================================================
+
+def auto_brightness_contrast(arr):
+    """画像全体の平均輝度を見て、明るさとコントラストを自動補正する"""
+    gray = arr.mean(axis=2)
+    mean_val = gray.mean()
+    target = 130  # 目標とする平均輝度
+    scale = target / max(mean_val, 1)
+    scale = np.clip(scale, 0.7, 1.6)  # 補正しすぎないよう範囲を制限
+    arr = arr * scale
+    arr = (arr - 128) * 1.12 + 128  # コントラストを軽く強調
+    return np.clip(arr, 0, 255)
+
+def apply_vignette(arr):
+    """中心からの距離に応じて周辺を暗くする、放射状マスクを自作して適用する"""
+    h, w = arr.shape[:2]
+    y, x = np.ogrid[:h, :w]
+    cx, cy = w / 2, h / 2
+    dist = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+    max_dist = np.sqrt(cx ** 2 + cy ** 2)
+    mask = 1 - 0.45 * (dist / max_dist) ** 2
+    mask = np.clip(mask, 0.4, 1.0)
+    return arr * mask[..., None]
+
+def pixelate(image, block=16):
+    """縮小してから最近傍補間で拡大し、モザイク（ピクセル化）を作る"""
+    w, h = image.size
+    small = image.resize((max(1, w // block), max(1, h // block)), Image.BILINEAR)
+    return small.resize((w, h), Image.NEAREST)
+
+def generate_instagram_photo(image, style="natural"):
+    """料理写真をSNS投稿向けに加工する（すべて自作のCV処理）"""
+    image = image.convert("RGB")
+    arr = np.asarray(image).astype(np.float32)
+
+    if style == "natural":
+        arr = auto_brightness_contrast(arr)
+        out = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+        out = ImageEnhance.Color(out).enhance(1.25)
+        out = ImageEnhance.Sharpness(out).enhance(1.3)
+        return out
+    elif style == "vignette":
+        arr = auto_brightness_contrast(arr)
+        arr = apply_vignette(arr)
+        out = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+        out = ImageEnhance.Color(out).enhance(1.35)
+        r, g, b = out.split()
+        r = r.point(lambda p: min(255, int(p * 1.08)))  # 赤みを足して暖色系に
+        return Image.merge("RGB", (r, g, b))
+    elif style == "mosaic":
+        base = pixelate(image, block=16)
+        return ImageEnhance.Color(base).enhance(1.15)
+    return image
+
 def estimate_calories_gemini(image):
     prompt = """この写真に写っている料理をすべて認識してください。
 カロリーや栄養素は、写真に写っている実際の量に基づいて推定してください。
@@ -924,6 +986,43 @@ with tab1:
                     </div>
                     """, unsafe_allow_html=True)
                 st.caption("💡 1日の栄養バランスは「今日のまとめ」タブでまとめて確認できます")
+
+            # ---- 【自作CV処理】インスタ映え加工 ----
+            st.session_state["_last_uploaded_image"] = image
+
+    # 直前にアップロードした画像があれば、加工セクションを常に表示する
+    if st.session_state.get("_last_uploaded_image") is not None:
+        st.divider()
+        st.markdown("**📸 この写真をSNS投稿用に加工する**")
+        st.caption("AIは使わず、明るさ補正・彩度強調・モザイク化などの画像処理をすべて自分のコードで行っています")
+
+        style_labels = {"natural": "✨ 自然補正", "vignette": "🌅 ビネット風", "mosaic": "🧩 モザイク風"}
+        style_cols = st.columns(3)
+        for i, (style_key, label) in enumerate(style_labels.items()):
+            with style_cols[i]:
+                if st.button(label, key=f"style_{style_key}", use_container_width=True):
+                    st.session_state["_photo_style"] = style_key
+
+        chosen_style = st.session_state.get("_photo_style")
+        if chosen_style:
+            src_img = st.session_state["_last_uploaded_image"]
+            edited = generate_instagram_photo(src_img, chosen_style)
+
+            edit_col1, edit_col2 = st.columns(2)
+            with edit_col1:
+                st.image(src_img, caption="元の写真", use_container_width=True)
+            with edit_col2:
+                st.image(edited, caption=f"加工後（{style_labels[chosen_style]}）", use_container_width=True)
+
+            buf = io.BytesIO()
+            edited.save(buf, format="JPEG", quality=92)
+            st.download_button(
+                "⬇️ 加工した写真をダウンロード",
+                data=buf.getvalue(),
+                file_name=f"mogureco_{chosen_style}.jpg",
+                mime="image/jpeg",
+                use_container_width=True,
+            )
 
 # ================================================================
 # タブ2：運動を記録
