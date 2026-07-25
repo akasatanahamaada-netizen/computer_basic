@@ -64,31 +64,31 @@ st.markdown("""
     /* ---------- タイトル（丸文字＋縁取り） ---------- */
     .main-title {
         text-align: center;
-        margin-bottom: 0.3rem;
+        margin-bottom: 0.1rem;
         display: flex;
         align-items: center;
         justify-content: center;
-        gap: 10px;
+        gap: 8px;
     }
     .main-title .logo-icon {
-        width: 44px;
-        height: 44px;
+        width: 32px;
+        height: 32px;
         flex-shrink: 0;
     }
     .main-title .accent {
-        font-size: 2.6rem;
+        font-size: 1.9rem;
         font-weight: 800;
         letter-spacing: 0.03em;
         color: var(--sunny);
-        -webkit-text-stroke: 2.5px var(--ink);
+        -webkit-text-stroke: 2px var(--ink);
         paint-order: stroke fill;
     }
     .sub-title {
         text-align: center;
         color: #8A8494;
-        font-size: 1rem;
+        font-size: 0.85rem;
         font-weight: 500;
-        margin-bottom: 1.8rem;
+        margin-bottom: 0.6rem;
     }
 
     /* ---------- ポップカード共通 ---------- */
@@ -191,16 +191,20 @@ st.markdown("""
         box-shadow: 2px 2px 0px rgba(45,42,50,0.2) !important;
     }
 
-    /* ---------- タブ ---------- */
+    /* ---------- タブ（スクロールしても上部に固定表示） ---------- */
     .stTabs [data-baseweb="tab-list"] {
         gap: 8px;
-        background: transparent;
+        background: var(--cream);
+        position: sticky;
+        top: 0;
+        z-index: 999;
+        padding: 8px 0 10px 0;
     }
     .stTabs [data-baseweb="tab"] {
         border-radius: 999px !important;
         background: #FFFFFF !important;
         border: 2.5px solid #EFE6DA !important;
-        padding: 8px 20px !important;
+        padding: 6px 16px !important;
         font-weight: 700 !important;
         color: #8A8494 !important;
     }
@@ -212,6 +216,16 @@ st.markdown("""
     }
     .stTabs [data-baseweb="tab-highlight"] { display: none; }
     .stTabs [data-baseweb="tab-border"] { display: none; }
+
+    /* ---------- 全体の余白を詰めて、情報密度を上げる ---------- */
+    .block-container {
+        padding-top: 1.2rem !important;
+        padding-bottom: 2rem !important;
+    }
+    div[data-testid="stVerticalBlock"] > div[style*="flex-direction: column"] > div {
+        gap: 0.4rem;
+    }
+    .stTabs { margin-top: -0.5rem; }
 
     /* ---------- ファイルアップローダー / セレクト / 入力 ---------- */
     section[data-testid="stFileUploaderDropzone"] {
@@ -1005,7 +1019,9 @@ if not st.session_state.user_id:
     st.info("👈 左のサイドバーで「ニックネーム」を入力すると、あなた専用の記録が始まります！")
     st.stop()
 
-tab1, tab2, tab3, tab4 = st.tabs(["🍽️ 食事を記録", "🏃 運動を記録", "📊 今日のまとめ", "📈 履歴グラフ"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "🍽️ 食事を記録", "🏃 運動を記録", "📊 今日のまとめ", "📈 履歴グラフ", "🎨 写真を加工",
+])
 
 # ================================================================
 # タブ1：食事を記録
@@ -1015,16 +1031,8 @@ with tab1:
     uploaded_file = st.file_uploader("写真を選ぶ", type=["jpg", "jpeg", "png", "webp"])
 
     if uploaded_file:
-        btn_col1, btn_col2 = st.columns(2)
-        with btn_col1:
-            analyze_clicked = st.button("🔍 料理を分析して記録", type="primary", use_container_width=True)
-        with btn_col2:
-            edit_only_clicked = st.button("🎨 写真の加工だけする（AI分析なし）", use_container_width=True)
-        st.caption("💡「加工だけ」はGemini AIを呼び出さないため、トークンを消費しません")
-
-        if edit_only_clicked:
-            st.session_state["_last_uploaded_image"] = Image.open(uploaded_file).convert("RGB")
-            st.session_state["_photo_style"] = None
+        analyze_clicked = st.button("🔍 料理を分析して記録", type="primary", use_container_width=True)
+        st.caption("💡 フィルターやモザイクなど写真の加工だけしたい場合は「🎨 写真を加工」タブへ")
     else:
         analyze_clicked = False
 
@@ -1146,109 +1154,9 @@ with tab1:
             # ---- 【自作CV処理】インスタ映え加工 ----
             st.session_state["_last_uploaded_image"] = image
 
-    # 直前にアップロードした画像があれば、加工セクションを常に表示する
+    # 写真の加工（フィルター・モザイクなど）は「🎨 写真を加工」タブでできます
     if st.session_state.get("_last_uploaded_image") is not None:
-        st.divider()
-        st.markdown("**📸 この写真をSNS投稿用に加工する**")
-        st.caption("AIは使わず、画像処理・古典的なCVアルゴリズムをすべて自分のコードで実装しています")
-
-        st.markdown("フィルター（プリセット）")
-        style_labels = {
-            "muted_warm": "🍂 低彩度・暖色寄り",
-            "natural_vivid": "🌿 自然な彩度高め",
-            "reduce_blue": "🔥 青み削り",
-        }
-        style_cols = st.columns(3)
-        for i, (style_key, label) in enumerate(style_labels.items()):
-            with style_cols[i]:
-                if st.button(label, key=f"style_{style_key}", use_container_width=True):
-                    st.session_state["_photo_style"] = style_key
-
-        with st.expander("🎚️ カスタム調整（スライダーで自分好みに）", expanded=False):
-            st.caption("インスタの編集機能と同じ-100〜100のスライダーです。動かすとプレビューが更新されます")
-            slide_col1, slide_col2 = st.columns(2)
-            with slide_col1:
-                s_brightness = st.slider("明るさ", -100, 100, 10, key="s_brightness")
-                s_contrast = st.slider("コントラスト", -100, 100, -5, key="s_contrast")
-                s_warmth = st.slider("暖かさ", -100, 100, 10, key="s_warmth")
-            with slide_col2:
-                s_saturation = st.slider("彩度", -100, 100, -10, key="s_saturation")
-                s_shadows = st.slider("シャドウ", -100, 100, 5, key="s_shadows")
-            if st.button("🎨 このスライダーで加工する", key="apply_custom", use_container_width=True):
-                st.session_state["_photo_style"] = "custom"
-
-        st.markdown("検出して加工")
-        if not CV2_AVAILABLE or _FACE_CASCADE is None:
-            st.warning(
-                "⚠️ この環境では画像検出ライブラリ（OpenCV）を読み込めなかったため、"
-                "「お皿検出」「顔検出」機能は現在使用できません。フィルターは通常通り使えます。"
-            )
-        else:
-            mosaic_grain = st.radio(
-                "モザイクの粗さ", ["🔲 荒め", "🔳 細かめ"],
-                horizontal=True, key="mosaic_grain",
-            )
-            is_coarse = mosaic_grain == "🔲 荒め"
-
-            detect_cols = st.columns(2)
-            with detect_cols[0]:
-                if st.button("🍽️ お皿だけ残して背景モザイク", key="style_plate", use_container_width=True):
-                    st.session_state["_photo_style"] = "plate"
-            with detect_cols[1]:
-                if st.button("🙈 人の顔だけモザイク", key="style_face", use_container_width=True):
-                    st.session_state["_photo_style"] = "face"
-
-        chosen_style = st.session_state.get("_photo_style")
-        if chosen_style in ("plate", "face") and (not CV2_AVAILABLE or _FACE_CASCADE is None):
-            chosen_style = None  # 検出系が使えない環境では選択をリセット
-
-        if chosen_style:
-            src_img = st.session_state["_last_uploaded_image"]
-            detect_note = None
-
-            if chosen_style == "plate":
-                plate_block = 26 if is_coarse else 10
-                with st.spinner("🔍 Hough変換でお皿の形（円）を検出中..."):
-                    edited, plate_detected = mosaic_background_outside_plate(src_img, block=plate_block)
-                caption = "加工後（お皿の外側をモザイク化）"
-                detect_note = "✅ 円形のお皿を検出しました" if plate_detected else "⚠️ お皿の形を検出できず、中央を基準にモザイク化しました"
-            elif chosen_style == "face":
-                face_divisor = 4 if is_coarse else 14
-                with st.spinner("🔍 Haar Cascadeで顔を検出中..."):
-                    edited, n_faces = mosaic_faces(src_img, block_divisor=face_divisor)
-                caption = "加工後（顔をモザイク化）"
-                detect_note = f"✅ {n_faces}件の顔を検出してモザイク化しました" if n_faces > 0 else "人の顔は検出されませんでした（そのままの写真です）"
-            elif chosen_style == "custom":
-                edited = apply_insta_adjustments(
-                    src_img,
-                    brightness=st.session_state.get("s_brightness", 10),
-                    contrast=st.session_state.get("s_contrast", -5),
-                    warmth=st.session_state.get("s_warmth", 10),
-                    saturation=st.session_state.get("s_saturation", -10),
-                    shadows=st.session_state.get("s_shadows", 5),
-                )
-                caption = "加工後（カスタム調整）"
-            else:
-                edited = generate_instagram_photo(src_img, chosen_style)
-                caption = f"加工後（{style_labels[chosen_style]}）"
-
-            edit_col1, edit_col2 = st.columns(2)
-            with edit_col1:
-                st.image(src_img, caption="元の写真", use_container_width=True)
-            with edit_col2:
-                st.image(edited, caption=caption, use_container_width=True)
-            if detect_note:
-                st.caption(detect_note)
-
-            buf = io.BytesIO()
-            edited.save(buf, format="JPEG", quality=92)
-            st.download_button(
-                "⬇️ 加工した写真をダウンロード",
-                data=buf.getvalue(),
-                file_name=f"mogureco_{chosen_style}.jpg",
-                mime="image/jpeg",
-                use_container_width=True,
-            )
+        st.info("🎨 写真の加工は「写真を加工」タブでできます")
 
 # ================================================================
 # タブ2：運動を記録
@@ -1538,3 +1446,118 @@ with tab4:
         persist_log()
         st.success("すべての記録を削除しました")
         st.rerun()
+
+# ================================================================
+# タブ5：写真を加工（フィルター・お皿検出・顔モザイクなど）
+# ================================================================
+with tab5:
+    st.subheader("🎨 写真を加工する")
+    st.caption("AIは使わず、画像処理・古典的なCVアルゴリズムをすべて自分のコードで実装しています（トークンは消費しません）")
+
+    edit_upload = st.file_uploader(
+        "加工したい写真を選ぶ", type=["jpg", "jpeg", "png", "webp"], key="edit_tab_uploader"
+    )
+    if edit_upload is not None:
+        st.session_state["_last_uploaded_image"] = Image.open(edit_upload).convert("RGB")
+        st.session_state["_photo_style"] = None
+
+    if st.session_state.get("_last_uploaded_image") is None:
+        st.info("📸 上のアップロード欄から写真を選ぶか、「食事を記録」タブで写真を分析すると、ここで加工できます")
+    else:
+        st.markdown("フィルター（プリセット）")
+        style_labels = {
+            "muted_warm": "🍂 低彩度・暖色寄り",
+            "natural_vivid": "🌿 自然な彩度高め",
+            "reduce_blue": "🔥 青み削り",
+        }
+        style_cols = st.columns(3)
+        for i, (style_key, label) in enumerate(style_labels.items()):
+            with style_cols[i]:
+                if st.button(label, key=f"style_{style_key}", use_container_width=True):
+                    st.session_state["_photo_style"] = style_key
+
+        with st.expander("🎚️ カスタム調整（スライダーで自分好みに）", expanded=False):
+            st.caption("インスタの編集機能と同じ-100〜100のスライダーです。動かすとプレビューが更新されます")
+            slide_col1, slide_col2 = st.columns(2)
+            with slide_col1:
+                s_brightness = st.slider("明るさ", -100, 100, 10, key="s_brightness")
+                s_contrast = st.slider("コントラスト", -100, 100, -5, key="s_contrast")
+                s_warmth = st.slider("暖かさ", -100, 100, 10, key="s_warmth")
+            with slide_col2:
+                s_saturation = st.slider("彩度", -100, 100, -10, key="s_saturation")
+                s_shadows = st.slider("シャドウ", -100, 100, 5, key="s_shadows")
+            if st.button("🎨 このスライダーで加工する", key="apply_custom", use_container_width=True):
+                st.session_state["_photo_style"] = "custom"
+
+        st.markdown("検出して加工")
+        if not CV2_AVAILABLE or _FACE_CASCADE is None:
+            st.warning(
+                "⚠️ この環境では画像検出ライブラリ（OpenCV）を読み込めなかったため、"
+                "「お皿検出」「顔検出」機能は現在使用できません。フィルターは通常通り使えます。"
+            )
+        else:
+            mosaic_grain = st.radio(
+                "モザイクの粗さ", ["🔲 荒め", "🔳 細かめ"],
+                horizontal=True, key="mosaic_grain",
+            )
+            is_coarse = mosaic_grain == "🔲 荒め"
+
+            detect_cols = st.columns(2)
+            with detect_cols[0]:
+                if st.button("🍽️ お皿だけ残して背景モザイク", key="style_plate", use_container_width=True):
+                    st.session_state["_photo_style"] = "plate"
+            with detect_cols[1]:
+                if st.button("🙈 人の顔だけモザイク", key="style_face", use_container_width=True):
+                    st.session_state["_photo_style"] = "face"
+
+        chosen_style = st.session_state.get("_photo_style")
+        if chosen_style in ("plate", "face") and (not CV2_AVAILABLE or _FACE_CASCADE is None):
+            chosen_style = None  # 検出系が使えない環境では選択をリセット
+
+        if chosen_style:
+            src_img = st.session_state["_last_uploaded_image"]
+            detect_note = None
+
+            if chosen_style == "plate":
+                plate_block = 26 if is_coarse else 10
+                with st.spinner("🔍 Hough変換でお皿の形（円）を検出中..."):
+                    edited, plate_detected = mosaic_background_outside_plate(src_img, block=plate_block)
+                caption = "加工後（お皿の外側をモザイク化）"
+                detect_note = "✅ 円形のお皿を検出しました" if plate_detected else "⚠️ お皿の形を検出できず、中央を基準にモザイク化しました"
+            elif chosen_style == "face":
+                face_divisor = 4 if is_coarse else 14
+                with st.spinner("🔍 Haar Cascadeで顔を検出中..."):
+                    edited, n_faces = mosaic_faces(src_img, block_divisor=face_divisor)
+                caption = "加工後（顔をモザイク化）"
+                detect_note = f"✅ {n_faces}件の顔を検出してモザイク化しました" if n_faces > 0 else "人の顔は検出されませんでした（そのままの写真です）"
+            elif chosen_style == "custom":
+                edited = apply_insta_adjustments(
+                    src_img,
+                    brightness=st.session_state.get("s_brightness", 10),
+                    contrast=st.session_state.get("s_contrast", -5),
+                    warmth=st.session_state.get("s_warmth", 10),
+                    saturation=st.session_state.get("s_saturation", -10),
+                    shadows=st.session_state.get("s_shadows", 5),
+                )
+                caption = "加工後（カスタム調整）"
+            else:
+                edited = generate_instagram_photo(src_img, chosen_style)
+                caption = f"加工後（{style_labels[chosen_style]}）"
+
+            edit_col1, edit_col2 = st.columns(2)
+            with edit_col1:
+                st.image(src_img, caption="元の写真", use_container_width=True)
+            with edit_col2:
+                st.image(edited, caption=caption, use_container_width=True)
+            if detect_note:
+                st.caption(detect_note)
+
+            buf = io.BytesIO()
+            edited.save(buf, format="JPEG", quality=92)
+            st.download_button(
+                "⬇️ 加工した写真をダウンロード",
+                data=buf.getvalue(),
+                file_name=f"mogureco_{chosen_style}.jpg",
+                mime="image/jpeg",
+                use_container_width=True,
+            )
