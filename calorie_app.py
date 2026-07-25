@@ -997,50 +997,24 @@ tab1, tab2, tab3, tab4 = st.tabs(["🍽️ 食事を記録", "🏃 運動を記�
 # タブ1：食事を記録
 # ================================================================
 with tab1:
-    # ---- よく記録する食事（再認記憶：写真なしでワンタップ再記録） ----
-    meal_seen = {}
-    for r in st.session_state.meal_log:
-        if r["type"] == "meal" and r["name"] != "認識できませんでした":
-            key = r["name"]
-            if key not in meal_seen:
-                meal_seen[key] = {
-                    "count": 0,
-                    "calories": r["calories"],
-                    "nutrients": r["nutrients"],
-                    "vitamins": r.get("vitamins", []),
-                    "minerals": r.get("minerals", []),
-                    "color_score": r.get("color_score"),
-                }
-            meal_seen[key]["count"] += 1
-    frequent_meals = sorted(meal_seen.items(), key=lambda x: x[1]["count"], reverse=True)[:3]
-
-    if frequent_meals:
-        st.markdown("**よく記録する食事（タップで即記録・写真不要）**")
-        cols = st.columns(len(frequent_meals))
-        for i, (name, info) in enumerate(frequent_meals):
-            with cols[i]:
-                if st.button(f"⚡ {name}\n{info['calories']} kcal", key=f"quick_meal_{name}", use_container_width=True):
-                    st.session_state.meal_log.append({
-                        "id": str(uuid.uuid4()),
-                        "date": date.today().strftime("%Y-%m-%d"),
-                        "time": datetime.now().strftime("%H:%M"),
-                        "type": "meal",
-                        "name": name,
-                        "calories": info["calories"],
-                        "nutrients": info["nutrients"],
-                        "vitamins": info["vitamins"],
-                        "minerals": info["minerals"],
-                        "color_score": info.get("color_score"),
-                    })
-                    st.toast(f"「{name}」を記録しました", icon="✅")
-                    persist_log()
-                    st.rerun()
-        st.divider()
-
     st.subheader("料理写真をアップロードして記録")
     uploaded_file = st.file_uploader("写真を選ぶ", type=["jpg", "jpeg", "png", "webp"])
 
-    if uploaded_file and st.button("🔍 料理を分析して記録", type="primary"):
+    if uploaded_file:
+        btn_col1, btn_col2 = st.columns(2)
+        with btn_col1:
+            analyze_clicked = st.button("🔍 料理を分析して記録", type="primary", use_container_width=True)
+        with btn_col2:
+            edit_only_clicked = st.button("🎨 写真の加工だけする（AI分析なし）", use_container_width=True)
+        st.caption("💡「加工だけ」はGemini AIを呼び出さないため、トークンを消費しません")
+
+        if edit_only_clicked:
+            st.session_state["_last_uploaded_image"] = Image.open(uploaded_file).convert("RGB")
+            st.session_state["_photo_style"] = None
+    else:
+        analyze_clicked = False
+
+    if analyze_clicked:
         if not gemini_ready:
             st.error("APIキーが設定されていません")
         else:
