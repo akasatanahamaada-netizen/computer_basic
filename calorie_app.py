@@ -523,22 +523,42 @@ def missing_color_advice(present_colors):
 # 【自作のCV処理】インスタ映え加工（画像変換）
 # ----------------------------------------------------------------
 # Gemini APIを使わず、PIL＋numpyだけで完結する古典的な画像処理。
-# 授業スライドの「画像を変換：明るさ補正・ぼかし・モザイク・フィルタ」に対応。
-#   ・低彩度・暖色寄り：彩度を落として赤みを足し、しっとり落ち着いた色調に
-#   ・自然な彩度高め：明るさ・コントラストを自動補正し、彩度とシャープネスを強調
-#   ・青み削り：青チャンネルを抑えて、蛍光灯などで生じる青被りを補正する
+# インスタグラムの編集機能にある「明るさ・コントラスト・暖かさ・彩度・
+# シャドウ」の5つのスライダーを、それぞれ個別の画像処理として自作する。
 # ================================================================
 
-def auto_brightness_contrast(arr):
-    """画像全体の平均輝度を見て、明るさとコントラストを自動補正する"""
-    gray = arr.mean(axis=2)
-    mean_val = gray.mean()
-    target = 130  # 目標とする平均輝度
-    scale = target / max(mean_val, 1)
-    scale = np.clip(scale, 0.7, 1.6)  # 補正しすぎないよう範囲を制限
-    arr = arr * scale
-    arr = (arr - 128) * 1.12 + 128  # コントラストを軽く強調
-    return np.clip(arr, 0, 255)
+def apply_insta_adjustments(image, brightness=0, contrast=0, warmth=0, saturation=0, shadows=0):
+    """
+    インスタグラムの編集機能を模した5つのスライダーを自作で実装する。
+    各値はインスタと同じ -100〜100 のスライダー値を想定。
+    """
+    arr = np.asarray(image.convert("RGB")).astype(np.float32) / 255.0
+
+    # ---- ① 明るさ：画像全体を底上げ／底下げする ----
+    arr = arr + (brightness / 100.0) * 0.12
+
+    # ---- ② シャドウ：暗い部分だけを持ち上げる（明るい部分はほぼ変化しない） ----
+    # (1-明るさ)^2 を重みにすることで、暗いピクセルほど強く持ち上がる
+    shadow_amt = (shadows / 100.0) * 0.35
+    arr = arr + shadow_amt * (1.0 - arr) ** 2
+
+    # ---- ③ コントラスト：中間値(0.5)を基準に伸び縮みさせる ----
+    contrast_factor = 1.0 + (contrast / 100.0) * 0.5
+    arr = (arr - 0.5) * contrast_factor + 0.5
+
+    # ---- ④ 暖かさ：Rチャンネルを上げ、Bチャンネルを下げて色温度をシフト ----
+    warmth_amt = (warmth / 100.0) * 0.18
+    arr[:, :, 0] = arr[:, :, 0] + warmth_amt
+    arr[:, :, 2] = arr[:, :, 2] - warmth_amt
+
+    arr = np.clip(arr, 0, 1)
+    out = Image.fromarray((arr * 255).astype(np.uint8))
+
+    # ---- ⑤ 彩度：PILのColorEnhanceで彩度だけを調整 ----
+    sat_factor = max(0.0, 1.0 + (saturation / 100.0))
+    out = ImageEnhance.Color(out).enhance(sat_factor)
+
+    return out
 
 def pixelate(image, block=16):
     """縮小してから最近傍補間で拡大し、モザイク（ピクセル化）を作る"""
@@ -549,37 +569,28 @@ def pixelate(image, block=16):
 def generate_instagram_photo(image, style="natural"):
     """料理写真をSNS投稿向けに加工する（すべて自作のCV処理）"""
     image = image.convert("RGB")
-    arr = np.asarray(image).astype(np.float32)
 
     if style == "muted_warm":
-        # ---- 低彩度・暖色寄り：しっとり落ち着いたトーン ----
-        arr = auto_brightness_contrast(arr)
-        # R(赤)を上げてB(青)を下げ、暖色方向に色温度をシフトさせる
-        arr[:, :, 0] = np.clip(arr[:, :, 0] * 1.06, 0, 255)
-        arr[:, :, 2] = np.clip(arr[:, :, 2] * 0.90, 0, 255)
-        out = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
-        out = ImageEnhance.Color(out).enhance(0.78)  # 彩度を落として落ち着いた印象に
-        out = ImageEnhance.Contrast(out).enhance(1.05)
-        return out
+        # ---- 低彩度・暖色寄り ----
+        # インスタの編集機能で「明るさ+10 コントラスト-5 暖かさ+10 彩度-10 シャドウ+5」
+        # とした場合のイメージをそのまま再現
+        return apply_insta_adjustments(
+            image, brightness=10, contrast=-5, warmth=10, saturation=-10, shadows=5
+        )
 
     elif style == "natural_vivid":
         # ---- 自然な彩度高め：くっきり鮮やかに ----
-        arr = auto_brightness_contrast(arr)
-        out = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
-        out = ImageEnhance.Color(out).enhance(1.4)
-        out = ImageEnhance.Sharpness(out).enhance(1.35)
-        out = ImageEnhance.Contrast(out).enhance(1.08)
+        out = apply_insta_adjustments(
+            image, brightness=5, contrast=10, warmth=0, saturation=28, shadows=-5
+        )
+        out = ImageEnhance.Sharpness(out).enhance(1.3)
         return out
 
     elif style == "reduce_blue":
-        # ---- 青み削り：蛍光灯などによる青被りを補正 ----
-        arr = auto_brightness_contrast(arr)
-        # 青チャンネルだけを抑え、赤・緑はそのまま（明るさの帳尻を軽く合わせる）
-        arr[:, :, 2] = np.clip(arr[:, :, 2] * 0.80, 0, 255)
-        arr[:, :, 0] = np.clip(arr[:, :, 0] * 1.03, 0, 255)
-        out = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
-        out = ImageEnhance.Color(out).enhance(1.15)
-        return out
+        # ---- 青み削り：蛍光灯などによる青被りを補正（暖かさを強めにプラス） ----
+        return apply_insta_adjustments(
+            image, brightness=0, contrast=0, warmth=28, saturation=5, shadows=0
+        )
 
     return image
 
