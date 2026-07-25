@@ -535,19 +535,19 @@ def apply_insta_adjustments(image, brightness=0, contrast=0, warmth=0, saturatio
     arr = np.asarray(image.convert("RGB")).astype(np.float32) / 255.0
 
     # ---- ① 明るさ：画像全体を底上げ／底下げする ----
-    arr = arr + (brightness / 100.0) * 0.12
+    arr = arr + (brightness / 100.0) * 0.22
 
     # ---- ② シャドウ：暗い部分だけを持ち上げる（明るい部分はほぼ変化しない） ----
     # (1-明るさ)^2 を重みにすることで、暗いピクセルほど強く持ち上がる
-    shadow_amt = (shadows / 100.0) * 0.35
+    shadow_amt = (shadows / 100.0) * 0.5
     arr = arr + shadow_amt * (1.0 - arr) ** 2
 
     # ---- ③ コントラスト：中間値(0.5)を基準に伸び縮みさせる ----
-    contrast_factor = 1.0 + (contrast / 100.0) * 0.5
+    contrast_factor = 1.0 + (contrast / 100.0) * 0.6
     arr = (arr - 0.5) * contrast_factor + 0.5
 
     # ---- ④ 暖かさ：Rチャンネルを上げ、Bチャンネルを下げて色温度をシフト ----
-    warmth_amt = (warmth / 100.0) * 0.18
+    warmth_amt = (warmth / 100.0) * 0.28
     arr[:, :, 0] = arr[:, :, 0] + warmth_amt
     arr[:, :, 2] = arr[:, :, 2] - warmth_amt
 
@@ -1152,7 +1152,7 @@ with tab1:
         st.markdown("**📸 この写真をSNS投稿用に加工する**")
         st.caption("AIは使わず、画像処理・古典的なCVアルゴリズムをすべて自分のコードで実装しています")
 
-        st.markdown("フィルター")
+        st.markdown("フィルター（プリセット）")
         style_labels = {
             "muted_warm": "🍂 低彩度・暖色寄り",
             "natural_vivid": "🌿 自然な彩度高め",
@@ -1163,6 +1163,19 @@ with tab1:
             with style_cols[i]:
                 if st.button(label, key=f"style_{style_key}", use_container_width=True):
                     st.session_state["_photo_style"] = style_key
+
+        with st.expander("🎚️ カスタム調整（スライダーで自分好みに）", expanded=False):
+            st.caption("インスタの編集機能と同じ-100〜100のスライダーです。動かすとプレビューが更新されます")
+            slide_col1, slide_col2 = st.columns(2)
+            with slide_col1:
+                s_brightness = st.slider("明るさ", -100, 100, 10, key="s_brightness")
+                s_contrast = st.slider("コントラスト", -100, 100, -5, key="s_contrast")
+                s_warmth = st.slider("暖かさ", -100, 100, 10, key="s_warmth")
+            with slide_col2:
+                s_saturation = st.slider("彩度", -100, 100, -10, key="s_saturation")
+                s_shadows = st.slider("シャドウ", -100, 100, 5, key="s_shadows")
+            if st.button("🎨 このスライダーで加工する", key="apply_custom", use_container_width=True):
+                st.session_state["_photo_style"] = "custom"
 
         st.markdown("検出して加工")
         if not CV2_AVAILABLE or _FACE_CASCADE is None:
@@ -1205,6 +1218,16 @@ with tab1:
                     edited, n_faces = mosaic_faces(src_img, block_divisor=face_divisor)
                 caption = "加工後（顔をモザイク化）"
                 detect_note = f"✅ {n_faces}件の顔を検出してモザイク化しました" if n_faces > 0 else "人の顔は検出されませんでした（そのままの写真です）"
+            elif chosen_style == "custom":
+                edited = apply_insta_adjustments(
+                    src_img,
+                    brightness=st.session_state.get("s_brightness", 10),
+                    contrast=st.session_state.get("s_contrast", -5),
+                    warmth=st.session_state.get("s_warmth", 10),
+                    saturation=st.session_state.get("s_saturation", -10),
+                    shadows=st.session_state.get("s_shadows", 5),
+                )
+                caption = "加工後（カスタム調整）"
             else:
                 edited = generate_instagram_photo(src_img, chosen_style)
                 caption = f"加工後（{style_labels[chosen_style]}）"
