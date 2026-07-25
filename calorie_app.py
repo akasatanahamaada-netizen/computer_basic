@@ -595,17 +595,29 @@ def generate_instagram_photo(image, style="natural"):
 # ================================================================
 
 def detect_plate_region(image):
-    """お皿らしい領域を検出し、(中心x, 中心y, 横半径, 縦半径, 検出方法) を返す"""
+    """
+    お皿らしい領域を検出し、(中心x, 中心y, 横半径, 縦半径, 検出方法) を返す。
+
+    ※ 明るい色の服（白・クリーム色のニット等）を着た人物が写っていると、
+      肌・服・手・お皿が画像上で地続きになり、色だけでは分離できないことがある。
+      そこで「料理写真では皿は画面の下側に写る」という構図の制約を利用し、
+      画面の上部38%（顔が写りやすい範囲）は検索対象から除外する。
+    """
     arr = np.asarray(image.convert("RGB"))
     h, w = arr.shape[:2]
-    hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
+
+    roi_top = int(h * 0.38)  # 顔が写りやすい上部を検索範囲から外す
+    roi = arr[roi_top:, :]
+    rh, rw = roi.shape[:2]
+
+    hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
     sat = hsv[:, :, 1].astype(np.float32) / 255.0
     val = hsv[:, :, 2].astype(np.float32) / 255.0
 
     # ---- ① 白っぽい（明るく彩度が低い）領域を抽出 ----
-    white_mask = ((val > 0.60) & (sat < 0.22)).astype(np.uint8) * 255
+    white_mask = ((val > 0.62) & (sat < 0.18)).astype(np.uint8) * 255
     white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-    white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
 
     # 料理がお皿の中央にあるとリング状（穴あき）になるため、輪郭を塗りつぶして
     # お皿全体を1つの塊として扱えるようにする
@@ -616,44 +628,45 @@ def detect_plate_region(image):
 
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(filled, connectivity=8)
     best = None
-    img_area = h * w
+    roi_area = rh * rw
     for i in range(1, num_labels):
         area = stats[i, cv2.CC_STAT_AREA]
         x, y, bw, bh = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
-        area_ratio = area / img_area
-        touches_edge = x <= 1 or y <= 1 or (x + bw) >= w - 1 or (y + bh) >= h - 1
+        area_ratio = area / roi_area
+        # 上下左右の端に接している場合は、体や背景の一部を拾っている可能性が高いため除外
+        # （下端だけは、皿が画面下端ぎりぎりに写る構図もあるため許容する）
+        touches_edge = x <= 1 or (x + bw) >= rw - 1 or (y + bh) >= rh - 1
         aspect = bw / max(bh, 1)
         fill_ratio = area / max(bw * bh, 1)  # 楕円らしい塗りつぶし率かどうか
-        if (0.04 <= area_ratio <= 0.55 and not touches_edge
-                and 0.65 <= aspect <= 3.4 and fill_ratio >= 0.6):
+        if (0.05 <= area_ratio <= 0.6 and not touches_edge
+                and 0.7 <= aspect <= 3.0 and fill_ratio >= 0.62):
             if best is None or area > best[0]:
                 best = (area, i)
 
     if best is not None:
         i = best[1]
         x, y, bw, bh = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
-        cx, cy = x + bw / 2, y + bh / 2
-        rx, ry = bw / 2 * 1.12, bh / 2 * 1.12  # 少し余裕を持たせる
+        cx, cy = x + bw / 2, y + bh / 2 + roi_top
+        rx, ry = bw / 2 * 1.1, bh / 2 * 1.1  # 少し余裕を持たせる
         return cx, cy, rx, ry, "color"
 
-    # ---- ② Hough変換（真円）を試す ----
-    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    # ---- ② Hough変換（真円）を、同じく下部ROI内で試す ----
+    gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
     gray_blur = cv2.medianBlur(gray, 7)
-    min_r = int(min(h, w) * 0.2)
-    max_r = int(min(h, w) * 0.45)
+    min_r = int(min(rh, rw) * 0.2)
+    max_r = int(min(rh, rw) * 0.48)
     circles = cv2.HoughCircles(
-        gray_blur, cv2.HOUGH_GRADIENT, dp=1.2, minDist=min(h, w),
+        gray_blur, cv2.HOUGH_GRADIENT, dp=1.2, minDist=min(rh, rw),
         param1=80, param2=45, minRadius=min_r, maxRadius=max_r
     )
     if circles is not None and len(circles[0]) > 0:
-        # 料理写真は下寄りに皿があることが多いので、そこに近い円を優先
-        cx0, cy0 = w / 2, h * 0.6
+        cx0, cy0 = rw / 2, rh / 2
         best_c = min(circles[0], key=lambda c: (c[0] - cx0) ** 2 + (c[1] - cy0) ** 2)
-        return float(best_c[0]), float(best_c[1]), float(best_c[2]), float(best_c[2]), "hough"
+        return float(best_c[0]), float(best_c[1]) + roi_top, float(best_c[2]), float(best_c[2]), "hough"
 
     # ---- ③ 最終フォールバック：顔が写りやすい上部を避けた控えめな楕円 ----
-    cx, cy = w / 2, h * 0.62
-    rx, ry = w * 0.30, h * 0.24
+    cx, cy = w / 2, h * 0.68
+    rx, ry = w * 0.28, h * 0.22
     return cx, cy, rx, ry, "fallback"
 
 def mosaic_background_outside_plate(image, block=18):
