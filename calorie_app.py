@@ -3,7 +3,6 @@ import google.generativeai as genai
 import requests
 from PIL import Image, ImageEnhance
 import numpy as np
-import cv2
 import json
 import re
 import os
@@ -14,6 +13,15 @@ import pandas as pd
 import altair as alt
 import warnings
 warnings.filterwarnings("ignore")
+
+# cv2（お皿検出・顔検出で使用）は環境によって読み込みに失敗することがあるため、
+# ここで失敗してもアプリ全体が止まらないよう安全に読み込む
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except Exception as _cv2_err:
+    CV2_AVAILABLE = False
+    _cv2_import_error = str(_cv2_err)
 
 # ================================================================
 # ページ設定
@@ -630,8 +638,18 @@ def mosaic_background_outside_plate(image, block=18):
 # 物体検出（特徴量ベース）。
 # ================================================================
 
-_HAAR_PATH = os.path.join(os.path.dirname(cv2.__file__), "data", "haarcascade_frontalface_default.xml")
-_FACE_CASCADE = cv2.CascadeClassifier(_HAAR_PATH)
+_FACE_CASCADE = None
+_cascade_load_error = None
+if CV2_AVAILABLE:
+    try:
+        _HAAR_PATH = os.path.join(os.path.dirname(cv2.__file__), "data", "haarcascade_frontalface_default.xml")
+        _FACE_CASCADE = cv2.CascadeClassifier(_HAAR_PATH)
+        if _FACE_CASCADE.empty():
+            _FACE_CASCADE = None
+            _cascade_load_error = "顔検出モデルの読み込みに失敗しました"
+    except Exception as e:
+        _FACE_CASCADE = None
+        _cascade_load_error = str(e)
 
 def detect_faces(image):
     """Haar Cascadeで画像内の顔を検出し、(x, y, w, h) のリストを返す"""
@@ -876,6 +894,17 @@ with st.sidebar:
     else:
         st.error("❌ FIREBASE_DB_URL 未設定")
 
+    if CV2_AVAILABLE and _FACE_CASCADE is not None:
+        st.success("✅ 画像検出機能（お皿・顔）が使えます")
+    else:
+        st.warning("⚠️ 画像検出機能は現在利用できません")
+        with st.expander("詳細"):
+            st.caption(f"CV2_AVAILABLE: {CV2_AVAILABLE}")
+            if not CV2_AVAILABLE:
+                st.caption(f"cv2 import error: {_cv2_import_error}")
+            if _cascade_load_error:
+                st.caption(f"cascade error: {_cascade_load_error}")
+
     with st.expander("💾 保存状態（デバッグ用）", expanded=False):
         st.caption(f"現在の記録件数: {len(st.session_state.meal_log)}")
         if st.session_state.get("_fb_save_error"):
@@ -1089,15 +1118,24 @@ with tab1:
                     st.session_state["_photo_style"] = style_key
 
         st.markdown("検出して加工")
-        detect_cols = st.columns(2)
-        with detect_cols[0]:
-            if st.button("🍽️ お皿だけ残して背景モザイク", key="style_plate", use_container_width=True):
-                st.session_state["_photo_style"] = "plate"
-        with detect_cols[1]:
-            if st.button("🙈 人の顔だけモザイク", key="style_face", use_container_width=True):
-                st.session_state["_photo_style"] = "face"
+        if not CV2_AVAILABLE or _FACE_CASCADE is None:
+            st.warning(
+                "⚠️ この環境では画像検出ライブラリ（OpenCV）を読み込めなかったため、"
+                "「お皿検出」「顔検出」機能は現在使用できません。フィルターは通常通り使えます。"
+            )
+        else:
+            detect_cols = st.columns(2)
+            with detect_cols[0]:
+                if st.button("🍽️ お皿だけ残して背景モザイク", key="style_plate", use_container_width=True):
+                    st.session_state["_photo_style"] = "plate"
+            with detect_cols[1]:
+                if st.button("🙈 人の顔だけモザイク", key="style_face", use_container_width=True):
+                    st.session_state["_photo_style"] = "face"
 
         chosen_style = st.session_state.get("_photo_style")
+        if chosen_style in ("plate", "face") and (not CV2_AVAILABLE or _FACE_CASCADE is None):
+            chosen_style = None  # 検出系が使えない環境では選択をリセット
+
         if chosen_style:
             src_img = st.session_state["_last_uploaded_image"]
             detect_note = None
