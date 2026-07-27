@@ -1454,7 +1454,10 @@ with tab1:
                 st.caption("💡 1日の栄養バランスは「今日のまとめ」タブでまとめて確認できます")
 
             # ---- 【自作CV処理】インスタ映え加工 ----
+            # id()だとガベージコレクション後に別の画像とIDが偶然一致することがあるため、
+            # 毎回ユニークなトークンを発行して「新しい写真かどうか」を確実に判定できるようにする
             st.session_state["_last_uploaded_image"] = image
+            st.session_state["_last_uploaded_image_token"] = uuid.uuid4().hex
 
     # 写真の加工（フィルター・モザイクなど）は「🎨 写真を加工」タブでできます
     if st.session_state.get("_last_uploaded_image") is not None:
@@ -1761,6 +1764,9 @@ with tab_photo:
     )
 
     # ---- 新しい写真が来たかどうかを判定し、来ていれば作業状態を初期化する ----
+    # ※ id()はガベージコレクション後にオブジェクトのIDが偶然再利用されることがあり、
+    #   「新しい写真なのに同じ写真だと誤判定される」バグの原因になるため使わない。
+    #   代わりにアップロードのたびに発行するユニークなトークンで比較する。
     new_source_img, new_source_id = None, None
     if edit_upload is not None:
         new_source_img = Image.open(edit_upload).convert("RGB")
@@ -1768,7 +1774,7 @@ with tab_photo:
     elif st.session_state.get("_last_uploaded_image") is not None:
         candidate = st.session_state["_last_uploaded_image"]
         new_source_img = candidate
-        new_source_id = ("meal_tab", id(candidate))
+        new_source_id = ("meal_tab", st.session_state.get("_last_uploaded_image_token"))
 
     if new_source_img is not None and st.session_state.get("_photo_source_id") != new_source_id:
         st.session_state["_original_image"] = new_source_img
@@ -1840,15 +1846,23 @@ with tab_photo:
             st.caption("枠をドラッグして料理を囲むと、その中からGrabCutで輪郭を検出します（木の皿・手も自動で除外を試みます）")
 
             if CROPPER_AVAILABLE:
+                # 列の幅からはみ出さないよう、cropperに渡す画像を縮小してから表示する。
+                # 選ばれた座標は縮小前の解像度に合わせてスケールし直す。
+                CROP_DISPLAY_MAX_W = 480
+                crop_scale = min(1.0, CROP_DISPLAY_MAX_W / work_img.width)
+                cropper_display_img = (
+                    work_img.resize((int(work_img.width * crop_scale), int(work_img.height * crop_scale)))
+                    if crop_scale < 1.0 else work_img
+                )
                 roi_box_raw = st_cropper(
-                    work_img, realtime_update=True, box_color="#FF6B6B",
+                    cropper_display_img, realtime_update=True, box_color="#FF6B6B",
                     aspect_ratio=None, return_type="box", key="food_cropper",
-                    should_resize_image=True,
+                    should_resize_image=False,
                 )
                 roi_box = (
-                    int(roi_box_raw["left"]), int(roi_box_raw["top"]),
-                    int(roi_box_raw["left"] + roi_box_raw["width"]),
-                    int(roi_box_raw["top"] + roi_box_raw["height"]),
+                    int(roi_box_raw["left"] / crop_scale), int(roi_box_raw["top"] / crop_scale),
+                    int((roi_box_raw["left"] + roi_box_raw["width"]) / crop_scale),
+                    int((roi_box_raw["top"] + roi_box_raw["height"]) / crop_scale),
                 )
             else:
                 st.warning("⚠️ ドラッグ選択ライブラリが読み込めなかったため、スライダーで範囲を選んでください")
