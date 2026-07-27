@@ -858,8 +858,19 @@ def detect_plate_outline_mask(image):
     if best is None:
         return None
 
+    # 輪郭を多角形近似して角張りを減らしてから塗りつぶす
+    contour = best[0]
+    peri = cv2.arcLength(contour, True)
+    contour = cv2.approxPolyDP(contour, 0.006 * peri, True)
+
     mask = np.zeros((h, w), dtype=np.uint8)
-    cv2.drawContours(mask, [best[0]], -1, 255, thickness=cv2.FILLED)
+    cv2.drawContours(mask, [contour], -1, 255, thickness=cv2.FILLED)
+
+    # 楕円カーネルで輪郭を滑らかにする
+    kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kern)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kern)
+
     return mask > 0
 
 def detect_food_mask_grabcut(image, roi_box, iterations=8):
@@ -944,7 +955,9 @@ def refine_mask_with_contours(mask):
     グレースケールの2値マスクに対して：
       ①floodFillで内部の小さな穴を埋める
       ②最大の輪郭だけを残し、孤立した小さな誤検出（ノイズ）を除去する
-      ③モルフォロジー処理で輪郭のギザギザを滑らかにする
+      ③輪郭を多角形近似→再描画して角張りを取る
+      ④楕円カーネルのモルフォロジー処理で滑らかにする
+      ⑤ガウシアンぼかしで輪郭のギザギザを最終的に消す
     """
     mask_u8 = (mask * 255).astype(np.uint8)
     h, w = mask_u8.shape
@@ -963,17 +976,27 @@ def refine_mask_with_contours(mask):
     if not contours:
         return mask
     largest = max(contours, key=cv2.contourArea)
+
+    # ③ 輪郭を多角形近似して角張りを滑らかにする
+    #    epsilon（近似精度）を周長の 0.8% にすることで、
+    #    細かなギザギザは消しつつ全体の形は保つ
+    peri = cv2.arcLength(largest, True)
+    approx = cv2.approxPolyDP(largest, 0.008 * peri, True)
     cleaned = np.zeros_like(mask_u8)
-    cv2.drawContours(cleaned, [largest], -1, 255, thickness=cv2.FILLED)
+    cv2.drawContours(cleaned, [approx], -1, 255, thickness=cv2.FILLED)
 
-    # ③ 輪郭を滑らかにする
-    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    # ④ 楕円カーネルで滑らかにする（正方形カーネルだと角張る）
+    #    OPEN で小さな突起を除去 → CLOSE で凹みを埋める
+    kern_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    kern_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
+    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kern_open)
+    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kern_close)
 
-    # ④ 指で隠れて凹んだ部分をある程度埋める（膨張→収縮のクロージング）。
-    #    指が皿の縁にかぶっていると、その部分だけ「見えない＝背景」と
-    #    判定されて皿が実際より狭く検出されてしまうため、小さな凹みは
-    #    滑らかに埋めて、指の陰に隠れた分をある程度補う。
-    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, np.ones((21, 21), np.uint8))
+    # ⑤ ガウシアンぼかし → 再二値化で輪郭を最終的に滑らかにする
+    #    二値マスクの境界をぼかしてから閾値で切り直すことで、
+    #    ピクセル単位のカクカクした階段状のエッジが消える
+    smoothed = cv2.GaussianBlur(cleaned, (15, 15), 0)
+    cleaned = (smoothed > 127).astype(np.uint8) * 255
 
     return (cleaned > 127).astype(np.float32)
 
