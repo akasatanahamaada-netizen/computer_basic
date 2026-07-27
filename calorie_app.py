@@ -1070,15 +1070,18 @@ def enhance_food_in_selection(image, roi_box, brightness=8, contrast=12, warmth=
 def apply_adjustments_to_mask(image, mask, brightness=0, contrast=0, warmth=0, saturation=0, shadows=0):
     """
     あらかじめ用意したマスク（0〜1のnumpy配列）の範囲だけに色味補正をかける汎用関数。
-    STEP1で確定した「料理のマスク」だけでなく、その反転（料理以外＝背景・人物側）
-    にも同じ処理を使い回せるようにしている。
+    マスクが0〜1のグラデーション（フェザリング付き楕円など）の場合は
+    そのまま使い、0/1の二値マスクの場合のみガウシアンぼかしで境界を滑らかにする。
     """
     image = image.convert("RGB")
     arr = np.asarray(image).astype(np.float32)
     mask = np.clip(mask.astype(np.float32), 0, 1)
 
-    # カーネルサイズは奇数でなければならないため調整
-    mask_blurred = cv2.GaussianBlur(mask, (25, 25), 0)
+    # マスクがすでに滑らかなグラデーションを持っているか判定
+    unique_vals = len(np.unique(mask[:100, :100].round(2)))  # サンプル領域で確認
+    if unique_vals <= 3:
+        # ほぼ二値マスク → ガウシアンぼかしで境界を滑らかに
+        mask = cv2.GaussianBlur(mask, (25, 25), 0)
 
     enhanced = apply_insta_adjustments(
         image, brightness=brightness, contrast=contrast,
@@ -1086,7 +1089,7 @@ def apply_adjustments_to_mask(image, mask, brightness=0, contrast=0, warmth=0, s
     )
     enhanced_arr = np.asarray(enhanced).astype(np.float32)
 
-    mask3 = mask_blurred[..., None]
+    mask3 = mask[..., None]
     out = arr * (1 - mask3) + enhanced_arr * mask3
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
 
@@ -1990,28 +1993,35 @@ with tab_photo:
                    "color_target", "mosaic_target", "mosaic_grain"]:
             st.session_state.pop(_k, None)
         st.session_state["_photo_version"] = st.session_state.get("_photo_version", 0) + 1
-        # 自動でお皿（料理）を検出してマスクを生成する
-        # Gemini AI → CV検出 の優先順でROIを決定し、GrabCutで精密マスクを作る
-        if CV2_AVAILABLE:
-            iw, ih = new_source_img.size
-            auto_roi = None
+        # 自動でお皿（料理）の楕円マスクを生成する
+        # GrabCutは境界がカクカクになりやすいため使わず、
+        # 検出した位置から滑らかなフェザリング付き楕円マスクを直接生成する
+        iw, ih = new_source_img.size
+        plate_cx, plate_cy, plate_rx, plate_ry = None, None, None, None
 
-            # ① Gemini AIで料理の位置を検出（最も正確）
-            if gemini_ready:
-                auto_roi = detect_food_region_gemini(new_source_img)
+        # ① Gemini AIで料理の位置を検出（最も正確）
+        if gemini_ready:
+            roi = detect_food_region_gemini(new_source_img)
+            if roi is not None:
+                x0, y0, x1, y1 = roi
+                plate_cx = (x0 + x1) / 2
+                plate_cy = (y0 + y1) / 2
+                plate_rx = (x1 - x0) / 2
+                plate_ry = (y1 - y0) / 2
 
-            # ② Geminiが使えない/失敗した場合はCV検出にフォールバック
-            if auto_roi is None:
-                cx, cy, rx, ry, method = detect_plate_region(new_source_img)
-                margin = 1.3
-                auto_roi = (
-                    max(0, int(cx - rx * margin)),
-                    max(0, int(cy - ry * margin)),
-                    min(iw, int(cx + rx * margin)),
-                    min(ih, int(cy + ry * margin)),
-                )
+        # ② Geminiが使えない/失敗した場合はCV検出にフォールバック
+        if plate_cx is None and CV2_AVAILABLE:
+            plate_cx, plate_cy, plate_rx, plate_ry, _method = detect_plate_region(new_source_img)
 
-            st.session_state["_confirmed_food_mask"] = detect_food_mask_grabcut(new_source_img, auto_roi)
+        # 楕円マスクを生成（フェザリングで境界をなめらかにぼかす）
+        if plate_cx is not None:
+            arr_h, arr_w = ih, iw
+            y_idx, x_idx = np.ogrid[:arr_h, :arr_w]
+            norm_dist = np.sqrt(((x_idx - plate_cx) / max(plate_rx, 1)) ** 2
+                                + ((y_idx - plate_cy) / max(plate_ry, 1)) ** 2)
+            feather = 0.18
+            food_mask = np.clip((1.0 + feather - norm_dist) / (2 * feather), 0, 1).astype(np.float32)
+            st.session_state["_confirmed_food_mask"] = food_mask
         else:
             st.session_state["_confirmed_food_mask"] = None
 
@@ -2024,31 +2034,43 @@ with tab_photo:
         mask_ready = food_mask is not None
 
         # カスタムスライダーの値を読み出してプレビューに使う
-        s_brightness = st.session_state.get("s_brightness", 10)
-        s_contrast = st.session_state.get("s_contrast", -5)
-        s_warmth = st.session_state.get("s_warmth", 10)
-        s_saturation = st.session_state.get("s_saturation", -10)
-        s_shadows = st.session_state.get("s_shadows", 5)
+        # 初期値は0（何も加工しない状態）にしておき、ユーザーが操作して初めて変わる
+        s_brightness = st.session_state.get("s_brightness", 0)
+        s_contrast = st.session_state.get("s_contrast", 0)
+        s_warmth = st.session_state.get("s_warmth", 0)
+        s_saturation = st.session_state.get("s_saturation", 0)
+        s_shadows = st.session_state.get("s_shadows", 0)
         color_target = st.session_state.get("color_target", "🍽️ 料理")
 
-        if mask_ready:
+        # スライダーが全部0（初期状態）ならプレビュー加工しない
+        has_custom = any([s_brightness, s_contrast, s_warmth, s_saturation, s_shadows])
+
+        if has_custom and mask_ready:
             target_mask = food_mask if color_target == "🍽️ 料理" else (1.0 - food_mask)
             custom_preview = apply_adjustments_to_mask(
                 work_img, target_mask, brightness=s_brightness, contrast=s_contrast,
                 warmth=s_warmth, saturation=s_saturation, shadows=s_shadows,
             )
-        else:
+        elif has_custom:
             custom_preview = apply_insta_adjustments(
                 work_img, brightness=s_brightness, contrast=s_contrast,
                 warmth=s_warmth, saturation=s_saturation, shadows=s_shadows,
             )
+        else:
+            custom_preview = None
 
         col_preview, col_edit = st.columns([1, 1], gap="medium")
 
         with col_preview:
-            display_img = custom_preview if custom_preview is not None else work_img
-            cap_target = f"（{color_target}の色味）" if mask_ready else ""
-            st.image(display_img, caption=f"🎚️ プレビュー{cap_target}・まだ保存されていません", use_container_width=True)
+            if custom_preview is not None:
+                display_img = custom_preview
+                cap_target = f"（{color_target}の色味）" if mask_ready else ""
+                display_caption = f"🎚️ プレビュー{cap_target}・まだ保存されていません"
+            else:
+                display_img = work_img
+                display_caption = "現在の写真"
+
+            st.image(display_img, caption=display_caption, use_container_width=True)
 
             if custom_preview is not None:
                 if st.button("✅ このプレビューを保存する", key="apply_custom_top", use_container_width=True):
@@ -2096,11 +2118,11 @@ with tab_photo:
                         st.rerun()
 
             with st.expander("🎚️ カスタム調整", expanded=False):
-                st.slider("明るさ", -100, 100, 10, key="s_brightness")
-                st.slider("コントラスト", -100, 100, -5, key="s_contrast")
-                st.slider("暖かさ", -100, 100, 10, key="s_warmth")
-                st.slider("彩度", -100, 100, -10, key="s_saturation")
-                st.slider("シャドウ", -100, 100, 5, key="s_shadows")
+                st.slider("明るさ", -100, 100, 0, key="s_brightness")
+                st.slider("コントラスト", -100, 100, 0, key="s_contrast")
+                st.slider("暖かさ", -100, 100, 0, key="s_warmth")
+                st.slider("彩度", -100, 100, 0, key="s_saturation")
+                st.slider("シャドウ", -100, 100, 0, key="s_shadows")
                 if st.button("✅ この色味で保存する", key="apply_custom", use_container_width=True):
                     st.session_state["_work_image"] = custom_preview
                     st.rerun()
