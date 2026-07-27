@@ -227,13 +227,44 @@ st.markdown("""
 
     /* ---------- 全体の余白を詰めて、情報密度を上げる ---------- */
     .block-container {
-        padding-top: 1.2rem !important;
-        padding-bottom: 2rem !important;
+        padding-top: 0.8rem !important;
+        padding-bottom: 1.5rem !important;
+        max-width: 1400px;
     }
     div[data-testid="stVerticalBlock"] > div[style*="flex-direction: column"] > div {
-        gap: 0.4rem;
+        gap: 0.3rem;
     }
     .stTabs { margin-top: -0.5rem; }
+
+    /* 見出し・小見出しを小さめに */
+    h1 { font-size: 1.5rem !important; margin: 0.2rem 0 !important; }
+    h2 { font-size: 1.2rem !important; margin: 0.2rem 0 !important; }
+    h3 { font-size: 1.05rem !important; margin: 0.15rem 0 !important; }
+    .stSubheader, div[data-testid="stMarkdownContainer"] p { margin-bottom: 0.2rem; }
+
+    /* スライダーを詰める */
+    div[data-testid="stSlider"] { padding: 0 !important; }
+    div[data-testid="stSlider"] label { font-size: 0.8rem !important; margin-bottom: -0.3rem !important; }
+
+    /* ボタンを少しコンパクトに */
+    .stButton button {
+        padding: 0.3rem 0.6rem !important;
+        font-size: 0.85rem !important;
+        min-height: 0 !important;
+    }
+
+    /* expander のヘッダーと中身の余白を詰める */
+    details summary { padding: 0.4rem 0.6rem !important; font-size: 0.9rem !important; }
+    div[data-testid="stExpanderDetails"] { padding-top: 0.3rem !important; }
+
+    /* キャプション・小さい注記を詰める */
+    div[data-testid="stCaptionContainer"] { margin: 0 !important; font-size: 0.72rem !important; }
+
+    /* 画像下のキャプション */
+    div[data-testid="stImage"] + div, .stImage figcaption { font-size: 0.72rem !important; }
+
+    /* ラジオ・チェックボックスを詰める */
+    div[data-testid="stRadio"] label, div[data-testid="stCheckbox"] label { font-size: 0.82rem !important; }
 
     /* ---------- ファイルアップローダー / セレクト / 入力 ---------- */
     section[data-testid="stFileUploaderDropzone"] {
@@ -1701,12 +1732,15 @@ with tab_photo:
                     st.rerun()
 
             # ---- ② ドラッグで範囲を選んで、料理だけをGrabCutで検出・補正 ----
-            with st.expander("🎯 範囲を選んで料理を補正", expanded=False):
+            st.markdown("**🎯 範囲を選んで料理を補正**")
+            use_roi = st.checkbox("範囲選択ツールを開く", key="use_roi_selector")
+            if use_roi:
                 if CROPPER_AVAILABLE:
-                    st.caption("枠の四隅をドラッグして、料理を囲んでください")
-                    _, roi_box_raw = st_cropper(
+                    st.caption("枠の四隅・辺をドラッグして料理を囲み、下のボタンを押してください")
+                    roi_box_raw = st_cropper(
                         work_img, realtime_update=True, box_color="#FF6B6B",
-                        aspect_ratio=None, return_type="both", key="food_cropper",
+                        aspect_ratio=None, return_type="box", key="food_cropper",
+                        should_resize_image=True,
                     )
                     roi_box = (
                         int(roi_box_raw["left"]), int(roi_box_raw["top"]),
