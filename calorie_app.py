@@ -1059,6 +1059,47 @@ def region_aware_food_portrait_enhance(image):
            + portrait_arr * face_mask[..., None])
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)), n_faces
 
+# ================================================================
+# 【AI補助】Geminiに「お皿ではなく料理の場所」だけを軽く聞く
+# ----------------------------------------------------------------
+# 範囲選択（GrabCut）の初期位置をユーザーが毎回手でドラッグしなくて
+# 済むよう、Geminiに大まかな位置だけ提案してもらう。トークン消費を
+# 抑えるため、①画像を小さく縮小してから送る②JSON形式のみを要求する
+# ③自動実行はせず、ボタンを押した時だけ1回呼び出す、という設計にする。
+# ================================================================
+
+def suggest_food_box_with_gemini(image, max_dim=384):
+    """
+    Geminiに、写真の中で「皿ではなく料理そのもの」が写っているおおよその
+    矩形を提案してもらう。画像を小さく縮小して送るため、通常の料理認識
+    （estimate_calories_gemini）よりトークン消費はかなり少ない。
+    戻り値: (x0, y0, x1, y1) 元画像のピクセル座標
+    """
+    small = image.convert("RGB").copy()
+    small.thumbnail((max_dim, max_dim))  # トークン節約：送る画像を小さくする
+
+    prompt = (
+        "この写真の中で、皿・器・テーブルではなく「料理（食べ物）そのもの」が"
+        "写っているおおよその範囲を教えてください。皿の縁は含めないでください。\n"
+        "画像の左上を(0,0)、右下を(1,1)として正規化した座標で、"
+        "次のJSON形式だけを返してください。説明文は不要です。\n"
+        '{"x0":0.0,"y0":0.0,"x1":1.0,"y1":1.0}'
+    )
+    model = genai.GenerativeModel("models/gemini-2.5-flash-lite")
+    response = model.generate_content([prompt, small])
+    text = response.text.strip()
+    text = re.sub(r'^```json|```$', '', text, flags=re.MULTILINE).strip()
+    data = json.loads(text)
+
+    w, h = image.size  # 正規化座標なので、実際の解像度に合わせて計算し直す
+    x0 = int(max(0.0, min(1.0, float(data["x0"]))) * w)
+    y0 = int(max(0.0, min(1.0, float(data["y0"]))) * h)
+    x1 = int(max(0.0, min(1.0, float(data["x1"]))) * w)
+    y1 = int(max(0.0, min(1.0, float(data["y1"]))) * h)
+    if x1 <= x0: x1 = min(w, x0 + 10)
+    if y1 <= y0: y1 = min(h, y0 + 10)
+    return (x0, y0, x1, y1)
+
 def estimate_calories_gemini(image):
     prompt = """この写真に写っている料理をすべて認識してください。
 カロリーや栄養素は、写真に写っている実際の量に基づいて推定してください。
@@ -1781,6 +1822,7 @@ with tab_photo:
         st.session_state["_work_image"] = new_source_img.copy()
         st.session_state["_photo_source_id"] = new_source_id
         st.session_state["_confirmed_food_mask"] = None  # 新しい写真では選択をやり直す
+        st.session_state["_ai_suggested_box"] = None
 
     work_img = st.session_state.get("_work_image")
 
@@ -1845,6 +1887,15 @@ with tab_photo:
             st.markdown("**STEP1　🎯 お皿の範囲を選ぶ**")
             st.caption("枠をドラッグして料理を囲むと、その中からGrabCutで輪郭を検出します（木の皿・手も自動で除外を試みます）")
 
+            if gemini_ready:
+                if st.button("🤖 AIに料理の場所を教えてもらう（軽量呼び出し・1回のみ）", key="ai_suggest_box", use_container_width=True):
+                    with st.spinner("Geminiに料理の位置を確認中（縮小画像で軽く問い合わせています）..."):
+                        try:
+                            st.session_state["_ai_suggested_box"] = suggest_food_box_with_gemini(work_img)
+                        except Exception as e:
+                            st.warning(f"AIからの提案取得に失敗しました（{e}）。手動で枠を選んでください。")
+                st.caption("💡 皿ではなく「料理そのもの」の場所だけを、縮小画像でGeminiに問い合わせます（通常の料理認識よりトークン消費は少なめです）")
+
             if CROPPER_AVAILABLE:
                 # 列の幅からはみ出さないよう、cropperに渡す画像を縮小してから表示する。
                 # 選ばれた座標は縮小前の解像度に合わせてスケールし直す。
@@ -1854,10 +1905,20 @@ with tab_photo:
                     work_img.resize((int(work_img.width * crop_scale), int(work_img.height * crop_scale)))
                     if crop_scale < 1.0 else work_img
                 )
+
+                default_coords = None
+                ai_box = st.session_state.get("_ai_suggested_box")
+                if ai_box is not None:
+                    ax0, ay0, ax1, ay1 = ai_box
+                    default_coords = (
+                        int(ax0 * crop_scale), int(ax1 * crop_scale),
+                        int(ay0 * crop_scale), int(ay1 * crop_scale),
+                    )
+
                 roi_box_raw = st_cropper(
                     cropper_display_img, realtime_update=True, box_color="#FF6B6B",
                     aspect_ratio=None, return_type="box", key="food_cropper",
-                    should_resize_image=False,
+                    should_resize_image=False, default_coords=default_coords,
                 )
                 roi_box = (
                     int(roi_box_raw["left"] / crop_scale), int(roi_box_raw["top"] / crop_scale),
