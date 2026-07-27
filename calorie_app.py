@@ -744,7 +744,8 @@ def detect_plate_region(image):
     return cx, cy, rx, ry, "fallback"
 
 def mosaic_background_outside_plate(image, block=18):
-    """お皿の外側だけをモザイク化する（お皿の内側＝料理はそのまま残す）"""
+    """お皿の外側だけをモザイク化する（お皿の内側＝料理はそのまま残す）
+    ※ STEP1で範囲選択をしていない場合の自動検出用フォールバック"""
     image = image.convert("RGB")
     arr = np.array(image)
     h, w = arr.shape[:2]
@@ -758,6 +759,19 @@ def mosaic_background_outside_plate(image, block=18):
     mask = norm_dist <= 1.0  # True = お皿の内側（楕円マスク）
     out = np.where(mask[..., None], arr, mosaic_full)
     return Image.fromarray(out.astype(np.uint8)), detected
+
+def mosaic_outside_mask(image, keep_mask, block=18):
+    """
+    あらかじめ用意したマスク（0〜1のnumpy配列）の外側だけをモザイク化する。
+    STEP1でGrabCutを使って確定した精密なマスクをそのまま使えるので、
+    mosaic_background_outside_plate（自動検出のみ）より境界が正確になる。
+    """
+    image = image.convert("RGB")
+    arr = np.array(image)
+    mosaic_full = np.array(pixelate(image, block=block))
+    mask_bin = (keep_mask > 0.5)[..., None]
+    out = np.where(mask_bin, arr, mosaic_full)
+    return Image.fromarray(out.astype(np.uint8))
 
 # ================================================================
 # 【自作のCV処理】料理だけを「美味しそうな色味」に補正する
@@ -2031,6 +2045,8 @@ with tab_photo:
                 st.warning("⚠️ この環境では画像検出ライブラリ（OpenCV）を読み込めなかったため使用できません")
             else:
                 st.caption("どちらか一方だけを選べます（選び直すと、もう片方は自動的に外れます）")
+                if mask_ready:
+                    st.caption("💡「お皿の外側」はSTEP1で確定した範囲をそのまま使うので、精度が高くなります")
                 mosaic_target = st.radio(
                     "モザイクの対象",
                     ["モザイクなし", "🍽️ お皿の外側をモザイク", "🙈 顔だけモザイク"],
@@ -2045,8 +2061,12 @@ with tab_photo:
                     if st.button("✅ モザイクを適用して保存", key="apply_mosaic", use_container_width=True):
                         if mosaic_target == "🍽️ お皿の外側をモザイク":
                             plate_block = 26 if is_coarse else 10
-                            with st.spinner("🔍 Hough変換でお皿を検出中..."):
-                                result_img, detected = mosaic_background_outside_plate(work_img, block=plate_block)
+                            if mask_ready:
+                                # STEP1で確定した精密なマスク（GrabCut＋輪郭検出）をそのまま使う
+                                result_img = mosaic_outside_mask(work_img, food_mask, block=plate_block)
+                            else:
+                                with st.spinner("🔍 Hough変換でお皿を検出中..."):
+                                    result_img, detected = mosaic_background_outside_plate(work_img, block=plate_block)
                         else:
                             face_divisor = 4 if is_coarse else 14
                             with st.spinner("🔍 Haar Cascadeで顔を検出中..."):
