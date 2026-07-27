@@ -807,10 +807,12 @@ def detect_plate_outline_mask(image):
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
     blurred = cv2.GaussianBlur(gray, (7, 7), 0)
     edges = cv2.Canny(blurred, 40, 120)
-    edges = cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=2)
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+    edges = cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=1)
+    # 別々の物体（テーブルの縁・ランチョンマットなど）を誤って結合しないよう、
+    # 閉じカーネルは控えめにする
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
 
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     img_area = h * w
     best = None
     for c in contours:
@@ -818,14 +820,24 @@ def detect_plate_outline_mask(image):
         area_ratio = area / img_area
         if area_ratio < 0.05 or area_ratio > 0.85:
             continue
-        perimeter = cv2.arcLength(c, True)
-        if perimeter == 0:
+        if len(c) < 5:
             continue
-        circularity = 4 * np.pi * area / (perimeter ** 2)  # 1に近いほど円形
+
+        # 円形度（circularity）は正方形も楕円もほぼ同じ値になってしまい区別できない
+        # （例：正方形0.785、楕円0.79）。代わりに「最小外接矩形との面積比」を使う。
+        # 真円・楕円なら理論上 約0.785（π/4）に近づき、四角形なら1.0に近づくため
+        # こちらの方がはっきり区別できる。
+        rect = cv2.minAreaRect(c)
+        (rx, ry), (rw, rh), angle = rect
+        rect_area = rw * rh
+        if rect_area == 0:
+            continue
+        extent = area / rect_area
+
         x, y, bw, bh = cv2.boundingRect(c)
         aspect = bw / max(bh, 1)
-        # お皿らしい形（ある程度丸く、極端に細長くない）だけを候補にする
-        if circularity > 0.25 and 0.4 <= aspect <= 2.5:
+        # 0.785(楕円らしい)を中心に、四角形(1.0)は除外する範囲にする
+        if 0.60 <= extent <= 0.90 and 0.4 <= aspect <= 2.5:
             if best is None or area > best[1]:
                 best = (c, area)
 
@@ -942,6 +954,12 @@ def refine_mask_with_contours(mask):
 
     # ③ 輪郭を滑らかにする
     cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+
+    # ④ 指で隠れて凹んだ部分をある程度埋める（膨張→収縮のクロージング）。
+    #    指が皿の縁にかぶっていると、その部分だけ「見えない＝背景」と
+    #    判定されて皿が実際より狭く検出されてしまうため、小さな凹みは
+    #    滑らかに埋めて、指の陰に隠れた分をある程度補う。
+    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, np.ones((21, 21), np.uint8))
 
     return (cleaned > 127).astype(np.float32)
 
