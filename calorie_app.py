@@ -31,13 +31,9 @@ except Exception as _cropper_err:
     CROPPER_AVAILABLE = False
     _cropper_import_error = str(_cropper_err)
 
-# streamlit-drawable-canvas（塗って範囲を教えるUI）も同様に安全に読み込む
-try:
-    from streamlit_drawable_canvas import st_canvas
-    CANVAS_AVAILABLE = True
-except Exception as _canvas_err:
-    CANVAS_AVAILABLE = False
-    _canvas_import_error = str(_canvas_err)
+# streamlit-drawable-canvas は内部でStreamlitの非公開API（image_to_url）に依存しており、
+# Streamlit Cloud側のバージョンとの相性で実行時エラーになったため使用をやめた。
+CANVAS_AVAILABLE = False
 
 # ================================================================
 # ページ設定
@@ -1840,82 +1836,34 @@ with tab_photo:
 
         with col_controls:
             # ==== STEP1：範囲を選んでお皿（料理）を検出 ====
-            st.markdown("**STEP1　🎯 料理の場所を教える**")
+            st.markdown("**STEP1　🎯 お皿の範囲を選ぶ**")
+            st.caption("枠をドラッグして料理を囲むと、その中からGrabCutで輪郭を検出します（木の皿・手も自動で除外を試みます）")
 
-            selection_method = st.radio(
-                "選び方",
-                ["🖌️ 塗って選ぶ（おすすめ）", "⬜ 四角い枠で選ぶ"],
-                key="roi_method", horizontal=True,
-            ) if CANVAS_AVAILABLE else "⬜ 四角い枠で選ぶ"
-
-            if selection_method == "🖌️ 塗って選ぶ（おすすめ）" and CANVAS_AVAILABLE:
-                st.caption("🟢 料理の上を軽くなぞり、🔴 皿や手の上を軽くなぞってから確定してください")
-                pen_mode = st.radio("ペンの色", ["🟢 料理", "🔴 皿・背景（手など）"], horizontal=True, key="scribble_pen")
-                stroke_color = "#00CC00" if pen_mode == "🟢 料理" else "#FF3333"
-
-                canvas_w = min(work_img.width, 620)
-                canvas_scale = canvas_w / work_img.width
-                canvas_h = int(work_img.height * canvas_scale)
-                bg_for_canvas = work_img.resize((canvas_w, canvas_h))
-
-                canvas_result = st_canvas(
-                    fill_color="rgba(0,0,0,0)",
-                    stroke_width=14,
-                    stroke_color=stroke_color,
-                    background_image=bg_for_canvas,
-                    update_streamlit=True,
-                    height=canvas_h, width=canvas_w,
-                    drawing_mode="freedraw",
-                    key="food_canvas",
+            if CROPPER_AVAILABLE:
+                roi_box_raw = st_cropper(
+                    work_img, realtime_update=True, box_color="#FF6B6B",
+                    aspect_ratio=None, return_type="box", key="food_cropper",
+                    should_resize_image=True,
                 )
-
-                if st.button("✅ 塗った範囲から料理を検出する", key="confirm_scribble", use_container_width=True):
-                    img_data = canvas_result.image_data if canvas_result is not None else None
-                    if img_data is None:
-                        st.warning("まだ何も塗られていません")
-                    else:
-                        r, g, b, a = img_data[:, :, 0], img_data[:, :, 1], img_data[:, :, 2], img_data[:, :, 3]
-                        green_small = (a > 0) & (g > 120) & (r < 120) & (b < 120)
-                        red_small = (a > 0) & (r > 120) & (g < 120) & (b < 120)
-
-                        if not green_small.any() or not red_small.any():
-                            st.warning("🟢 料理と 🔴 皿・背景の両方を、少しずつ塗ってから実行してください")
-                        else:
-                            iw, ih = work_img.size
-                            green_full = cv2.resize(green_small.astype(np.uint8), (iw, ih), interpolation=cv2.INTER_NEAREST).astype(bool)
-                            red_full = cv2.resize(red_small.astype(np.uint8), (iw, ih), interpolation=cv2.INTER_NEAREST).astype(bool)
-                            with st.spinner("🔍 GrabCutで料理の輪郭を検出しています..."):
-                                detected_mask = detect_food_mask_from_scribbles(work_img, green_full, red_full)
-                            st.session_state["_confirmed_food_mask"] = detected_mask
-                            st.toast(f"料理を検出しました（画像全体の約{float(detected_mask.mean())*100:.0f}%）", icon="✅")
-                            st.rerun()
+                roi_box = (
+                    int(roi_box_raw["left"]), int(roi_box_raw["top"]),
+                    int(roi_box_raw["left"] + roi_box_raw["width"]),
+                    int(roi_box_raw["top"] + roi_box_raw["height"]),
+                )
             else:
-                st.caption("枠をドラッグして料理を囲むと、その中からGrabCutで輪郭を検出します")
-                if CROPPER_AVAILABLE:
-                    roi_box_raw = st_cropper(
-                        work_img, realtime_update=True, box_color="#FF6B6B",
-                        aspect_ratio=None, return_type="box", key="food_cropper",
-                        should_resize_image=True,
-                    )
-                    roi_box = (
-                        int(roi_box_raw["left"]), int(roi_box_raw["top"]),
-                        int(roi_box_raw["left"] + roi_box_raw["width"]),
-                        int(roi_box_raw["top"] + roi_box_raw["height"]),
-                    )
-                else:
-                    st.warning("⚠️ ドラッグ選択ライブラリが読み込めなかったため、スライダーで範囲を選んでください")
-                    iw, ih = work_img.size
-                    x_range = st.slider("横方向の範囲", 0, iw, (int(iw * 0.1), int(iw * 0.9)), key="roi_x")
-                    y_range = st.slider("縦方向の範囲", 0, ih, (int(ih * 0.4), int(ih * 0.95)), key="roi_y")
-                    roi_box = (x_range[0], y_range[0], x_range[1], y_range[1])
-                    st.image(draw_selection_box(work_img, roi_box), caption="選択中の範囲", use_container_width=True)
+                st.warning("⚠️ ドラッグ選択ライブラリが読み込めなかったため、スライダーで範囲を選んでください")
+                iw, ih = work_img.size
+                x_range = st.slider("横方向の範囲", 0, iw, (int(iw * 0.1), int(iw * 0.9)), key="roi_x")
+                y_range = st.slider("縦方向の範囲", 0, ih, (int(ih * 0.4), int(ih * 0.95)), key="roi_y")
+                roi_box = (x_range[0], y_range[0], x_range[1], y_range[1])
+                st.image(draw_selection_box(work_img, roi_box), caption="選択中の範囲", use_container_width=True)
 
-                if st.button("✅ この範囲でお皿を検出する", key="confirm_roi", use_container_width=True):
-                    with st.spinner("🔍 GrabCutで料理の輪郭を検出しています..."):
-                        detected_mask = detect_food_mask_grabcut(work_img, roi_box)
-                    st.session_state["_confirmed_food_mask"] = detected_mask
-                    st.toast(f"お皿（料理）を検出しました（選択範囲内の約{float(detected_mask.mean())*100:.0f}%）", icon="✅")
-                    st.rerun()
+            if st.button("✅ この範囲でお皿を検出する", key="confirm_roi", use_container_width=True):
+                with st.spinner("🔍 GrabCutで料理の輪郭を検出しています..."):
+                    detected_mask = detect_food_mask_grabcut(work_img, roi_box)
+                st.session_state["_confirmed_food_mask"] = detected_mask
+                st.toast(f"お皿（料理）を検出しました（選択範囲内の約{float(detected_mask.mean())*100:.0f}%）", icon="✅")
+                st.rerun()
 
             if mask_ready:
                 st.success("✅ お皿の範囲を検出済みです（STEP2・STEP3が使えます）")
