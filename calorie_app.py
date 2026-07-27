@@ -814,63 +814,80 @@ def detect_plate_outline_mask(image):
     料理は色が様々で当てにならないが、お皿の縁は色によらず輪郭として
     現れるため、色情報に頼らずグレースケール＋Canny法で検出する。
 
+    柄のあるお皿（和食器など）では、模様のエッジが大量に検出されて
+    お皿の「縁」の輪郭が途切れるため、強めのブラー＋大きな閉じカーネルで
+    模様を潰してから縁だけを拾う。それでも見つからなければ楕円フィッティングを試す。
+
     戻り値: (h, w) のbool配列（お皿の内側と思われる領域）。見つからなければNone。
     """
     arr = np.asarray(image.convert("RGB"))
     h, w = arr.shape[:2]
-    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
-    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
-    edges = cv2.Canny(blurred, 40, 120)
-    edges = cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=1)
-    # 別々の物体（テーブルの縁・ランチョンマットなど）を誤って結合しないよう、
-    # 閉じカーネルは控えめにする
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
 
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    img_area = h * w
-    best = None
-    for c in contours:
-        area = cv2.contourArea(c)
-        area_ratio = area / img_area
-        if area_ratio < 0.05 or area_ratio > 0.85:
-            continue
-        if len(c) < 5:
-            continue
+    # --- 複数のパラメータで試行する（柄の多い皿→強いブラーが必要） ---
+    candidates = []
+    for blur_k, canny_lo, canny_hi, close_k in [
+        (7,  40, 120,  9),   # 標準（シンプルな白い皿向け）
+        (15, 50, 150, 21),   # 柄のある皿向け（強ブラーで模様を潰す）
+        (21, 60, 180, 31),   # さらに強い（複雑な和食器向け）
+    ]:
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        blurred = cv2.GaussianBlur(gray, (blur_k, blur_k), 0)
+        edges = cv2.Canny(blurred, canny_lo, canny_hi)
+        kern_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_k, close_k))
+        edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
+        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kern_close)
 
-        # 円形度（circularity）は正方形も楕円もほぼ同じ値になってしまい区別できない
-        # （例：正方形0.785、楕円0.79）。代わりに「最小外接矩形との面積比」を使う。
-        # 真円・楕円なら理論上 約0.785（π/4）に近づき、四角形なら1.0に近づくため
-        # こちらの方がはっきり区別できる。
-        rect = cv2.minAreaRect(c)
-        (rx, ry), (rw, rh), angle = rect
-        rect_area = rw * rh
-        if rect_area == 0:
-            continue
-        extent = area / rect_area
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        img_area = h * w
+        for c in contours:
+            area = cv2.contourArea(c)
+            area_ratio = area / img_area
+            if area_ratio < 0.05 or area_ratio > 0.85:
+                continue
+            if len(c) < 5:
+                continue
+            rect = cv2.minAreaRect(c)
+            (rx, ry), (rw, rh), angle = rect
+            rect_area = rw * rh
+            if rect_area == 0:
+                continue
+            extent = area / rect_area
+            x, y, bw, bh = cv2.boundingRect(c)
+            aspect = bw / max(bh, 1)
+            if 0.55 <= extent <= 0.92 and 0.3 <= aspect <= 3.0:
+                candidates.append((c, area))
 
-        x, y, bw, bh = cv2.boundingRect(c)
-        aspect = bw / max(bh, 1)
-        # 0.785(楕円らしい)を中心に、四角形(1.0)は除外する範囲にする
-        if 0.60 <= extent <= 0.90 and 0.4 <= aspect <= 2.5:
-            if best is None or area > best[1]:
-                best = (c, area)
-
-    if best is None:
+    if not candidates:
         return None
 
-    # 輪郭を多角形近似して角張りを減らしてから塗りつぶす
-    contour = best[0]
-    peri = cv2.arcLength(contour, True)
-    contour = cv2.approxPolyDP(contour, 0.006 * peri, True)
+    best_contour = max(candidates, key=lambda x: x[1])[0]
 
+    # 凸包で包んでから楕円フィットし、滑らかな形にする
+    hull = cv2.convexHull(best_contour)
+    mask_out = np.zeros((h, w), dtype=np.uint8)
+    if len(hull) >= 5:
+        ellipse = cv2.fitEllipse(hull)
+        cv2.ellipse(mask_out, ellipse, 255, thickness=cv2.FILLED)
+    else:
+        cv2.drawContours(mask_out, [hull], -1, 255, thickness=cv2.FILLED)
+
+    return mask_out > 0
+
+
+def _ellipse_mask_from_roi(h, w, x0, y0, x1, y1):
+    """
+    ROI矩形に内接する楕円のマスクを生成する（フォールバック用）。
+    お皿は大抵は楕円形なので、輪郭検出が全く効かない場合でも
+    矩形よりは遥かにマシな初期マスクになる。
+    """
     mask = np.zeros((h, w), dtype=np.uint8)
-    cv2.drawContours(mask, [contour], -1, 255, thickness=cv2.FILLED)
-
-    # 楕円カーネルで輪郭を滑らかにする
-    kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kern)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kern)
-
+    cx = (x0 + x1) // 2
+    cy = (y0 + y1) // 2
+    # ROI の 90% に内接する楕円（少し内側にすることで皿の縁を含めやすい）
+    ax = int((x1 - x0) * 0.45)
+    ay = int((y1 - y0) * 0.45)
+    if ax > 0 and ay > 0:
+        cv2.ellipse(mask, (cx, cy), (ax, ay), 0, 0, 360, 255, thickness=cv2.FILLED)
     return mask > 0
 
 def detect_food_mask_grabcut(image, roi_box, iterations=8):
@@ -894,6 +911,11 @@ def detect_food_mask_grabcut(image, roi_box, iterations=8):
     # ① 輪郭（形）だけでお皿の外形を検出（色に依存しない、最も信頼できる手がかり）
     plate_outline = detect_plate_outline_mask(image)
 
+    # 輪郭検出が失敗した場合は、ROI矩形に内接する楕円をフォールバックとして使う。
+    # お皿はほぼ必ず楕円形なので、真四角のまま進むよりずっと良い結果になる。
+    if plate_outline is None:
+        plate_outline = _ellipse_mask_from_roi(h, w, x0, y0, x1, y1)
+
     # ② 白い皿判定
     hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
     sat = hsv[:, :, 1].astype(np.float32) / 255.0
@@ -913,12 +935,11 @@ def detect_food_mask_grabcut(image, roi_box, iterations=8):
     mask = np.full((h, w), cv2.GC_BGD, np.uint8)           # 枠の外＝確実な背景
     mask[y0:y1, x0:x1] = cv2.GC_PR_FGD                      # 枠の中＝たぶん料理
 
-    # 輪郭でお皿の外形が検出できていれば、その外側は枠内であっても
-    # 「確実な背景」まで強く倒す（手やテーブルが写り込んでいても除外できる）
-    if plate_outline is not None:
-        outside_outline = np.zeros((h, w), dtype=bool)
-        outside_outline[y0:y1, x0:x1] = ~plate_outline[y0:y1, x0:x1]
-        mask[outside_outline] = cv2.GC_BGD
+    # 輪郭（または楕円フォールバック）でお皿の外形が得られているので、
+    # その外側は枠内であっても「確実な背景」として扱う
+    outside_outline = np.zeros((h, w), dtype=bool)
+    outside_outline[y0:y1, x0:x1] = ~plate_outline[y0:y1, x0:x1]
+    mask[outside_outline] = cv2.GC_BGD
 
     box_exclude = np.zeros((h, w), dtype=bool)
     box_exclude[y0:y1, x0:x1] = plate_like[y0:y1, x0:x1]
