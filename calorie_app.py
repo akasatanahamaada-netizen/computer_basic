@@ -794,6 +794,48 @@ def _skin_mask(arr):
     cr, cb = ycrcb[:, :, 1], ycrcb[:, :, 2]
     return (cr >= 133) & (cr <= 178) & (cb >= 77) & (cb <= 127)
 
+def detect_plate_outline_mask(image):
+    """
+    色を一切使わず、輪郭（エッジ）の形だけでお皿の大まかな外形を検出する。
+    料理は色が様々で当てにならないが、お皿の縁は色によらず輪郭として
+    現れるため、色情報に頼らずグレースケール＋Canny法で検出する。
+
+    戻り値: (h, w) のbool配列（お皿の内側と思われる領域）。見つからなければNone。
+    """
+    arr = np.asarray(image.convert("RGB"))
+    h, w = arr.shape[:2]
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+    edges = cv2.Canny(blurred, 40, 120)
+    edges = cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=2)
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    img_area = h * w
+    best = None
+    for c in contours:
+        area = cv2.contourArea(c)
+        area_ratio = area / img_area
+        if area_ratio < 0.05 or area_ratio > 0.85:
+            continue
+        perimeter = cv2.arcLength(c, True)
+        if perimeter == 0:
+            continue
+        circularity = 4 * np.pi * area / (perimeter ** 2)  # 1に近いほど円形
+        x, y, bw, bh = cv2.boundingRect(c)
+        aspect = bw / max(bh, 1)
+        # お皿らしい形（ある程度丸く、極端に細長くない）だけを候補にする
+        if circularity > 0.25 and 0.4 <= aspect <= 2.5:
+            if best is None or area > best[1]:
+                best = (c, area)
+
+    if best is None:
+        return None
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.drawContours(mask, [best[0]], -1, 255, thickness=cv2.FILLED)
+    return mask > 0
+
 def detect_food_mask_grabcut(image, roi_box, iterations=8):
     """
     ユーザーが選んだ大まかな矩形(roi_box)から、GrabCutで料理の輪郭を精密に抽出する。
@@ -802,10 +844,9 @@ def detect_food_mask_grabcut(image, roi_box, iterations=8):
       ・お皿ぴったりに枠を選んだ場合（背景の手がかりが枠内にない）
       ・木製など「白くない」皿（明るさ・彩度だけの判定では皿と気づけない）
       ・皿を手で持っている場合（指や手のひらが料理と誤認識される）
-    そこで3つの手がかりを組み合わせてマスクを作る：
-      ① 明るく彩度の低い「白い皿」判定（従来通り）
-      ② 選択範囲の縁の色をサンプリングし、それに近い色も「皿」とみなす（木の皿対応）
-      ③ 肌色（YCrCb）を検出し、手・指を確実に除外する
+    料理は色が様々で当てにならないため、まず①輪郭（形）でお皿の大まかな
+    外形を検出し（色を一切使わない）、それを最優先の手がかりとして使う。
+    それに②白い皿判定③縁の色サンプリング④肌色検出を組み合わせる。
     """
     arr = np.asarray(image.convert("RGB"))
     h, w = arr.shape[:2]
@@ -813,24 +854,34 @@ def detect_food_mask_grabcut(image, roi_box, iterations=8):
     x0, y0 = max(0, min(x0, w - 2)), max(0, min(y0, h - 2))
     x1, y1 = max(x0 + 1, min(x1, w - 1)), max(y0 + 1, min(y1, h - 1))
 
-    # ① 白い皿判定
+    # ① 輪郭（形）だけでお皿の外形を検出（色に依存しない、最も信頼できる手がかり）
+    plate_outline = detect_plate_outline_mask(image)
+
+    # ② 白い皿判定
     hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
     sat = hsv[:, :, 1].astype(np.float32) / 255.0
     val = hsv[:, :, 2].astype(np.float32) / 255.0
     whiteish = (val > 0.6) & (sat < 0.25)
 
-    # ② 縁の色（皿の色）に近い色も「皿」とみなす
+    # ③ 縁の色（皿の色）に近い色も「皿」とみなす
     border_color = _sample_border_color(arr, x0, y0, x1, y1)
     color_dist = np.linalg.norm(arr.astype(np.float32) - border_color, axis=2)
     plate_colorish = color_dist < 30
 
-    # ③ 肌色（手・指）を検出
+    # ④ 肌色（手・指）を検出
     skin = _skin_mask(arr)
 
     plate_like = (whiteish | plate_colorish) & (~skin)
 
     mask = np.full((h, w), cv2.GC_BGD, np.uint8)           # 枠の外＝確実な背景
     mask[y0:y1, x0:x1] = cv2.GC_PR_FGD                      # 枠の中＝たぶん料理
+
+    # 輪郭でお皿の外形が検出できていれば、その外側は枠内であっても
+    # 「確実な背景」まで強く倒す（手やテーブルが写り込んでいても除外できる）
+    if plate_outline is not None:
+        outside_outline = np.zeros((h, w), dtype=bool)
+        outside_outline[y0:y1, x0:x1] = ~plate_outline[y0:y1, x0:x1]
+        mask[outside_outline] = cv2.GC_BGD
 
     box_exclude = np.zeros((h, w), dtype=bool)
     box_exclude[y0:y1, x0:x1] = plate_like[y0:y1, x0:x1]
