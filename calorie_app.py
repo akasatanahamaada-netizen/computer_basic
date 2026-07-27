@@ -1810,7 +1810,7 @@ with tab_photo:
         else:
             custom_preview = None
 
-        col_preview, col_controls = st.columns([1, 1], gap="medium")
+        col_preview, col_step1, col_step23 = st.columns([0.9, 1.1, 1], gap="medium")
 
         with col_preview:
             if custom_preview is not None:
@@ -1842,7 +1842,7 @@ with tab_photo:
                     use_container_width=True,
                 )
 
-        with col_controls:
+        with col_step1:
             # ==== STEP1：範囲を選んでお皿（料理）を検出 ====
             st.markdown("**STEP1　🎯 お皿の範囲を選ぶ**")
             st.caption("枠をドラッグして料理を囲むと、その中からGrabCutで輪郭を検出します（木の皿・手も自動で除外を試みます）")
@@ -1850,7 +1850,7 @@ with tab_photo:
             if CROPPER_AVAILABLE:
                 # 列の幅からはみ出さないよう、cropperに渡す画像を縮小してから表示する。
                 # 選ばれた座標は縮小前の解像度に合わせてスケールし直す。
-                CROP_DISPLAY_MAX_W = 480
+                CROP_DISPLAY_MAX_W = 380
                 crop_scale = min(1.0, CROP_DISPLAY_MAX_W / work_img.width)
                 cropper_display_img = (
                     work_img.resize((int(work_img.width * crop_scale), int(work_img.height * crop_scale)))
@@ -1883,12 +1883,11 @@ with tab_photo:
                 st.rerun()
 
             if mask_ready:
-                st.success("✅ お皿の範囲を検出済みです（STEP2・STEP3が使えます）")
+                st.success("✅ 検出済み（STEP2・3が使えます）")
             else:
-                st.info("👆 教えると、次のステップが使えるようになります")
+                st.info("👆 検出すると、右のSTEP2・3が使えます")
 
-            st.divider()
-
+        with col_step23:
             # ==== STEP2：料理／それ以外の色味を変える ====
             st.markdown("**STEP2　🎨 色味を変える**")
             if not mask_ready:
@@ -1900,7 +1899,6 @@ with tab_photo:
                 )
                 target_mask_for_preset = food_mask if st.session_state.get("color_target", "🍽️ 料理") == "🍽️ 料理" else (1.0 - food_mask)
 
-                st.caption("プリセットは押した瞬間に、選んだ側の色味だけ変えて保存します")
                 preset_cols = st.columns(3)
                 preset_params = {
                     "muted_warm": ("🍂 低彩度暖色", dict(brightness=10, contrast=-5, warmth=10, saturation=-10, shadows=5)),
@@ -1913,15 +1911,15 @@ with tab_photo:
                             st.session_state["_work_image"] = apply_adjustments_to_mask(work_img, target_mask_for_preset, **params)
                             st.rerun()
 
-                st.markdown("**カスタム調整**（動かすと上のプレビューが即座に変わります）")
-                st.slider("明るさ", -100, 100, 10, key="s_brightness")
-                st.slider("コントラスト", -100, 100, -5, key="s_contrast")
-                st.slider("暖かさ", -100, 100, 10, key="s_warmth")
-                st.slider("彩度", -100, 100, -10, key="s_saturation")
-                st.slider("シャドウ", -100, 100, 5, key="s_shadows")
-                if st.button("✅ この色味で保存する", key="apply_custom", use_container_width=True):
-                    st.session_state["_work_image"] = custom_preview
-                    st.rerun()
+                with st.expander("🎚️ カスタム調整", expanded=False):
+                    st.slider("明るさ", -100, 100, 10, key="s_brightness")
+                    st.slider("コントラスト", -100, 100, -5, key="s_contrast")
+                    st.slider("暖かさ", -100, 100, 10, key="s_warmth")
+                    st.slider("彩度", -100, 100, -10, key="s_saturation")
+                    st.slider("シャドウ", -100, 100, 5, key="s_shadows")
+                    if st.button("✅ この色味で保存する", key="apply_custom", use_container_width=True):
+                        st.session_state["_work_image"] = custom_preview
+                        st.rerun()
 
             st.divider()
 
