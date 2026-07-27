@@ -1955,8 +1955,17 @@ with tab_photo:
         st.session_state["_photo_version"] = st.session_state.get("_photo_version", 0) + 1
         # 自動でお皿（料理）を検出してマスクを生成する
         if CV2_AVAILABLE:
+            # まず detect_plate_region でお皿のおおまかな位置を特定し、
+            # その周辺を ROI として GrabCut に渡す
             iw, ih = new_source_img.size
-            auto_roi = (0, 0, iw, ih)
+            cx, cy, rx, ry, method = detect_plate_region(new_source_img)
+            # 検出した楕円をやや広めに囲む矩形を ROI にする
+            margin = 1.3
+            auto_x0 = max(0, int(cx - rx * margin))
+            auto_y0 = max(0, int(cy - ry * margin))
+            auto_x1 = min(iw, int(cx + rx * margin))
+            auto_y1 = min(ih, int(cy + ry * margin))
+            auto_roi = (auto_x0, auto_y0, auto_x1, auto_y1)
             st.session_state["_confirmed_food_mask"] = detect_food_mask_grabcut(new_source_img, auto_roi)
         else:
             st.session_state["_confirmed_food_mask"] = None
