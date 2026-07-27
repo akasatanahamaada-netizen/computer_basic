@@ -154,6 +154,7 @@ st.markdown("""
     section[data-testid="stSidebar"] {
         background: #FFFFFF;
         border-right: 3px dashed #EFE6DA;
+        zoom: 0.8;
     }
     section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {
         font-weight: 800 !important;
@@ -199,7 +200,7 @@ st.markdown("""
         box-shadow: 2px 2px 0px rgba(45,42,50,0.2) !important;
     }
 
-    /* ---------- タブ（スクロールしても上部に固定表示） ---------- */
+    /* ---------- タブ（スクロールしても上部に固定表示・0.8倍縮小の対象外） ---------- */
     .stTabs [data-baseweb="tab-list"] {
         gap: 8px;
         background: var(--cream);
@@ -207,6 +208,7 @@ st.markdown("""
         top: 0;
         z-index: 999;
         padding: 8px 0 10px 0;
+        zoom: 1.25; /* 親のblock-containerが0.8倍になる分を打ち消し、タブは等倍のまま表示する */
     }
     .stTabs [data-baseweb="tab"] {
         border-radius: 999px !important;
@@ -225,11 +227,12 @@ st.markdown("""
     .stTabs [data-baseweb="tab-highlight"] { display: none; }
     .stTabs [data-baseweb="tab-border"] { display: none; }
 
-    /* ---------- 全体の余白を詰めて、情報密度を上げる ---------- */
+    /* ---------- 全体を0.8倍に縮小（タブメニューを除く） ---------- */
     .block-container {
         padding-top: 0.8rem !important;
         padding-bottom: 1.5rem !important;
         max-width: 1400px;
+        zoom: 0.8;
     }
     div[data-testid="stVerticalBlock"] > div[style*="flex-direction: column"] > div {
         gap: 0.3rem;
@@ -816,6 +819,29 @@ def enhance_food_in_selection(image, roi_box, brightness=8, contrast=12, warmth=
     out = arr * (1 - mask3) + enhanced_arr * mask3
     coverage = float(food_mask.mean())
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)), coverage
+
+def apply_adjustments_to_mask(image, mask, brightness=0, contrast=0, warmth=0, saturation=0, shadows=0):
+    """
+    あらかじめ用意したマスク（0〜1のnumpy配列）の範囲だけに色味補正をかける汎用関数。
+    STEP1で確定した「料理のマスク」だけでなく、その反転（料理以外＝背景・人物側）
+    にも同じ処理を使い回せるようにしている。
+    """
+    image = image.convert("RGB")
+    arr = np.asarray(image).astype(np.float32)
+    mask = np.clip(mask.astype(np.float32), 0, 1)
+
+    # カーネルサイズは奇数でなければならないため調整
+    mask_blurred = cv2.GaussianBlur(mask, (25, 25), 0)
+
+    enhanced = apply_insta_adjustments(
+        image, brightness=brightness, contrast=contrast,
+        warmth=warmth, saturation=saturation, shadows=shadows,
+    )
+    enhanced_arr = np.asarray(enhanced).astype(np.float32)
+
+    mask3 = mask_blurred[..., None]
+    out = arr * (1 - mask3) + enhanced_arr * mask3
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
 
 def draw_selection_box(image, roi_box, color=(255, 107, 107), width=4):
     """選択中の矩形をプレビュー用に描画する"""
@@ -1662,39 +1688,50 @@ with tab_photo:
         st.session_state["_original_image"] = new_source_img
         st.session_state["_work_image"] = new_source_img.copy()
         st.session_state["_photo_source_id"] = new_source_id
+        st.session_state["_confirmed_food_mask"] = None  # 新しい写真では選択をやり直す
 
     work_img = st.session_state.get("_work_image")
 
     if work_img is None:
         st.info("📸 上のアップロード欄から写真を選ぶか、「食事を記録」タブで写真を分析すると、ここで加工できます")
     else:
-        # カスタムスライダーの値は col_controls 側で作られるが、Streamlitは
-        # ウィジェットの値をキーごとに session_state に保持しているため、
-        # ここで先に読み出してプレビューを「現在の写真」の上に表示できる
+        food_mask = st.session_state.get("_confirmed_food_mask")
+        mask_ready = food_mask is not None
+
+        # カスタムスライダーの値はSTEP2側で作られるが、Streamlitはウィジェットの値を
+        # キーごとにsession_stateに保持しているため、ここで先に読み出してプレビューに使う
         s_brightness = st.session_state.get("s_brightness", 10)
         s_contrast = st.session_state.get("s_contrast", -5)
         s_warmth = st.session_state.get("s_warmth", 10)
         s_saturation = st.session_state.get("s_saturation", -10)
         s_shadows = st.session_state.get("s_shadows", 5)
-        custom_preview = apply_insta_adjustments(
-            work_img, brightness=s_brightness, contrast=s_contrast,
-            warmth=s_warmth, saturation=s_saturation, shadows=s_shadows,
-        )
+        color_target = st.session_state.get("color_target", "🍽️ 料理")
+
+        if mask_ready:
+            target_mask = food_mask if color_target == "🍽️ 料理" else (1.0 - food_mask)
+            custom_preview = apply_adjustments_to_mask(
+                work_img, target_mask, brightness=s_brightness, contrast=s_contrast,
+                warmth=s_warmth, saturation=s_saturation, shadows=s_shadows,
+            )
+        else:
+            custom_preview = None
 
         col_preview, col_controls = st.columns([1, 1], gap="medium")
 
         with col_preview:
-            st.image(custom_preview, caption="🎚️ プレビュー（スライダーの値を反映・まだ保存されていません）", use_container_width=True)
-            if st.button("✅ このプレビューを保存する", key="apply_custom_top", use_container_width=True):
-                st.session_state["_work_image"] = custom_preview
-                st.rerun()
+            if custom_preview is not None:
+                st.image(custom_preview, caption=f"🎚️ プレビュー（{color_target}の色味・まだ保存されていません）", use_container_width=True)
+                if st.button("✅ このプレビューを保存する", key="apply_custom_top", use_container_width=True):
+                    st.session_state["_work_image"] = custom_preview
+                    st.rerun()
+                st.divider()
 
-            st.divider()
             st.image(work_img, caption="現在の写真（ここまでの加工がすべて反映されています）", use_container_width=True)
             reset_col, dl_col = st.columns(2)
             with reset_col:
                 if st.button("↩️ 最初の状態に戻す", use_container_width=True):
                     st.session_state["_work_image"] = st.session_state["_original_image"].copy()
+                    st.session_state["_confirmed_food_mask"] = None
                     st.rerun()
             with dl_col:
                 buf = io.BytesIO()
@@ -1706,22 +1743,68 @@ with tab_photo:
                 )
 
         with col_controls:
-            # ---- ① 色味フィルター：押す・保存するたびに「現在の写真」を上書きする ----
-            with st.expander("🎨 色味フィルター", expanded=True):
-                st.caption("プリセットは押した瞬間に、現在の写真の上に重ねて保存されます")
+            # ==== STEP1：範囲を選んでお皿（料理）を検出 ====
+            st.markdown("**STEP1　🎯 お皿の範囲を選ぶ**")
+            st.caption("枠をドラッグして料理を囲むと、その中からGrabCutで輪郭を検出します")
+
+            if CROPPER_AVAILABLE:
+                roi_box_raw = st_cropper(
+                    work_img, realtime_update=True, box_color="#FF6B6B",
+                    aspect_ratio=None, return_type="box", key="food_cropper",
+                    should_resize_image=True,
+                )
+                roi_box = (
+                    int(roi_box_raw["left"]), int(roi_box_raw["top"]),
+                    int(roi_box_raw["left"] + roi_box_raw["width"]),
+                    int(roi_box_raw["top"] + roi_box_raw["height"]),
+                )
+            else:
+                st.warning("⚠️ ドラッグ選択ライブラリが読み込めなかったため、スライダーで範囲を選んでください")
+                iw, ih = work_img.size
+                x_range = st.slider("横方向の範囲", 0, iw, (int(iw * 0.1), int(iw * 0.9)), key="roi_x")
+                y_range = st.slider("縦方向の範囲", 0, ih, (int(ih * 0.4), int(ih * 0.95)), key="roi_y")
+                roi_box = (x_range[0], y_range[0], x_range[1], y_range[1])
+                st.image(draw_selection_box(work_img, roi_box), caption="選択中の範囲", use_container_width=True)
+
+            if st.button("✅ この範囲でお皿を検出する", key="confirm_roi", use_container_width=True):
+                with st.spinner("🔍 GrabCutで料理の輪郭を検出しています..."):
+                    detected_mask = detect_food_mask_grabcut(work_img, roi_box)
+                st.session_state["_confirmed_food_mask"] = detected_mask
+                st.toast(f"お皿（料理）を検出しました（選択範囲内の約{float(detected_mask.mean())*100:.0f}%）", icon="✅")
+                st.rerun()
+
+            if mask_ready:
+                st.success("✅ お皿の範囲を検出済みです（STEP2・STEP3が使えます）")
+            else:
+                st.info("👆 範囲を選んで検出すると、次のステップが使えるようになります")
+
+            st.divider()
+
+            # ==== STEP2：料理／それ以外の色味を変える ====
+            st.markdown("**STEP2　🎨 色味を変える**")
+            if not mask_ready:
+                st.caption("STEP1でお皿を検出すると使えるようになります")
+            else:
+                st.radio(
+                    "どこの色味を変える？", ["🍽️ 料理", "🖼️ 料理以外（背景・人物など）"],
+                    horizontal=True, key="color_target",
+                )
+                target_mask_for_preset = food_mask if st.session_state.get("color_target", "🍽️ 料理") == "🍽️ 料理" else (1.0 - food_mask)
+
+                st.caption("プリセットは押した瞬間に、選んだ側の色味だけ変えて保存します")
                 preset_cols = st.columns(3)
-                preset_map = {
-                    "muted_warm": "🍂 低彩度暖色",
-                    "natural_vivid": "🌿 彩度高め",
-                    "reduce_blue": "🔥 青み削り",
+                preset_params = {
+                    "muted_warm": ("🍂 低彩度暖色", dict(brightness=10, contrast=-5, warmth=10, saturation=-10, shadows=5)),
+                    "natural_vivid": ("🌿 彩度高め", dict(brightness=5, contrast=10, warmth=0, saturation=28, shadows=-5)),
+                    "reduce_blue": ("🔥 青み削り", dict(brightness=0, contrast=0, warmth=28, saturation=5, shadows=0)),
                 }
-                for i, (style_key, label) in enumerate(preset_map.items()):
+                for i, (style_key, (label, params)) in enumerate(preset_params.items()):
                     with preset_cols[i]:
                         if st.button(label, key=f"preset_{style_key}", use_container_width=True):
-                            st.session_state["_work_image"] = generate_instagram_photo(work_img, style_key)
+                            st.session_state["_work_image"] = apply_adjustments_to_mask(work_img, target_mask_for_preset, **params)
                             st.rerun()
 
-                st.markdown("**カスタム調整**（動かすと左上のプレビューが即座に変わります）")
+                st.markdown("**カスタム調整**（動かすと上のプレビューが即座に変わります）")
                 st.slider("明るさ", -100, 100, 10, key="s_brightness")
                 st.slider("コントラスト", -100, 100, -5, key="s_contrast")
                 st.slider("暖かさ", -100, 100, 10, key="s_warmth")
@@ -1731,78 +1814,33 @@ with tab_photo:
                     st.session_state["_work_image"] = custom_preview
                     st.rerun()
 
-            # ---- ② ドラッグで範囲を選んで、料理だけをGrabCutで検出・補正 ----
-            st.markdown("**🎯 範囲を選んで料理を補正**")
-            use_roi = st.checkbox("範囲選択ツールを開く", key="use_roi_selector")
-            if use_roi:
-                if CROPPER_AVAILABLE:
-                    st.caption("枠の四隅・辺をドラッグして料理を囲み、下のボタンを押してください")
-                    roi_box_raw = st_cropper(
-                        work_img, realtime_update=True, box_color="#FF6B6B",
-                        aspect_ratio=None, return_type="box", key="food_cropper",
-                        should_resize_image=True,
-                    )
-                    roi_box = (
-                        int(roi_box_raw["left"]), int(roi_box_raw["top"]),
-                        int(roi_box_raw["left"] + roi_box_raw["width"]),
-                        int(roi_box_raw["top"] + roi_box_raw["height"]),
-                    )
-                else:
-                    st.warning("⚠️ ドラッグ選択ライブラリが読み込めなかったため、スライダーで範囲を選んでください")
-                    iw, ih = work_img.size
-                    x_range = st.slider("横方向の範囲", 0, iw, (int(iw * 0.1), int(iw * 0.9)), key="roi_x")
-                    y_range = st.slider("縦方向の範囲", 0, ih, (int(ih * 0.4), int(ih * 0.95)), key="roi_y")
-                    roi_box = (x_range[0], y_range[0], x_range[1], y_range[1])
-                    st.image(draw_selection_box(work_img, roi_box), caption="選択中の範囲", use_container_width=True)
+            st.divider()
 
-                if st.button("✅ この範囲から料理を検出して保存", key="apply_roi", use_container_width=True):
-                    with st.spinner("🔍 GrabCutで料理の輪郭を検出しています..."):
-                        result_img, coverage = enhance_food_in_selection(work_img, roi_box)
-                    st.session_state["_work_image"] = result_img
-                    st.toast(f"料理らしき部分（範囲内の約{coverage*100:.0f}%）を補正しました", icon="✅")
-                    st.rerun()
-
-            # ---- ③ 自動検出（お皿／顔）でまとめて色味補正 ----
-            with st.expander("🍽️ 自動検出でまとめて補正", expanded=False):
-                if not CV2_AVAILABLE:
-                    st.warning("⚠️ この環境では画像検出ライブラリ（OpenCV）を読み込めなかったため使用できません")
-                else:
-                    auto_cols = st.columns(2)
-                    with auto_cols[0]:
-                        if st.button("🍽️ 料理だけ美味しそうに", key="apply_food_only", use_container_width=True):
-                            with st.spinner("🔍 お皿を検出中..."):
-                                result_img, detected = enhance_food_only(work_img)
-                            st.session_state["_work_image"] = result_img
-                            st.rerun()
-                    with auto_cols[1]:
-                        if st.button("🍽️👤 料理と人で色味を変える", key="apply_food_portrait", use_container_width=True):
-                            with st.spinner("🔍 お皿と顔を検出中..."):
-                                result_img, n_faces = region_aware_food_portrait_enhance(work_img)
-                            st.session_state["_work_image"] = result_img
-                            st.rerun()
-
-            # ---- ④ モザイク処理（保存済みの写真の上にさらに重ねて適用できる） ----
-            with st.expander("🧩 モザイク処理", expanded=False):
-                if not CV2_AVAILABLE or _FACE_CASCADE is None:
-                    st.warning("⚠️ この環境では画像検出ライブラリ（OpenCV）を読み込めなかったため使用できません")
-                else:
+            # ==== STEP3：モザイク（お皿の外側／顔のどちらか一方だけ） ====
+            st.markdown("**STEP3　🧩 モザイク処理**")
+            if not CV2_AVAILABLE or _FACE_CASCADE is None:
+                st.warning("⚠️ この環境では画像検出ライブラリ（OpenCV）を読み込めなかったため使用できません")
+            else:
+                st.caption("どちらか一方だけを選べます（選び直すと、もう片方は自動的に外れます）")
+                mosaic_target = st.radio(
+                    "モザイクの対象",
+                    ["モザイクなし", "🍽️ お皿の外側をモザイク", "🙈 顔だけモザイク"],
+                    key="mosaic_target",
+                )
+                if mosaic_target != "モザイクなし":
                     mosaic_grain = st.radio(
                         "モザイクの粗さ", ["🔲 荒め", "🔳 細かめ"],
                         horizontal=True, key="mosaic_grain",
                     )
                     is_coarse = mosaic_grain == "🔲 荒め"
-                    mos_cols = st.columns(2)
-                    with mos_cols[0]:
-                        if st.button("🍽️ お皿の外側だけモザイク", key="apply_plate_mosaic", use_container_width=True):
+                    if st.button("✅ モザイクを適用して保存", key="apply_mosaic", use_container_width=True):
+                        if mosaic_target == "🍽️ お皿の外側をモザイク":
                             plate_block = 26 if is_coarse else 10
                             with st.spinner("🔍 Hough変換でお皿を検出中..."):
                                 result_img, detected = mosaic_background_outside_plate(work_img, block=plate_block)
-                            st.session_state["_work_image"] = result_img
-                            st.rerun()
-                    with mos_cols[1]:
-                        if st.button("🙈 顔だけモザイク", key="apply_face_mosaic", use_container_width=True):
+                        else:
                             face_divisor = 4 if is_coarse else 14
                             with st.spinner("🔍 Haar Cascadeで顔を検出中..."):
                                 result_img, n_faces = mosaic_faces(work_img, block_divisor=face_divisor)
-                            st.session_state["_work_image"] = result_img
-                            st.rerun()
+                        st.session_state["_work_image"] = result_img
+                        st.rerun()
