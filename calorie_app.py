@@ -1948,14 +1948,18 @@ with tab_photo:
     if new_source_img is not None:
         st.session_state["_original_image"] = new_source_img
         st.session_state["_work_image"] = new_source_img.copy()
-        st.session_state["_confirmed_food_mask"] = None  # 新しい写真では選択をやり直す
         # 古い写真に対して設定していたスライダー・ラジオ等もリセットする
         for _k in ["s_brightness", "s_contrast", "s_warmth", "s_saturation", "s_shadows",
                    "color_target", "mosaic_target", "mosaic_grain"]:
             st.session_state.pop(_k, None)
-        # cropperコンポーネントのキーを変えて、フロント側の内部状態も
-        # 確実に作り直す（古い写真のクロップ位置が残らないようにする）
         st.session_state["_photo_version"] = st.session_state.get("_photo_version", 0) + 1
+        # 自動でお皿（料理）を検出してマスクを生成する
+        if CV2_AVAILABLE:
+            iw, ih = new_source_img.size
+            auto_roi = (0, 0, iw, ih)
+            st.session_state["_confirmed_food_mask"] = detect_food_mask_grabcut(new_source_img, auto_roi)
+        else:
+            st.session_state["_confirmed_food_mask"] = None
 
     work_img = st.session_state.get("_work_image")
 
@@ -1965,8 +1969,7 @@ with tab_photo:
         food_mask = st.session_state.get("_confirmed_food_mask")
         mask_ready = food_mask is not None
 
-        # カスタムスライダーの値はSTEP2側で作られるが、Streamlitはウィジェットの値を
-        # キーごとにsession_stateに保持しているため、ここで先に読み出してプレビューに使う
+        # カスタムスライダーの値を読み出してプレビューに使う
         s_brightness = st.session_state.get("s_brightness", 10)
         s_contrast = st.session_state.get("s_contrast", -5)
         s_warmth = st.session_state.get("s_warmth", 10)
@@ -1981,19 +1984,17 @@ with tab_photo:
                 warmth=s_warmth, saturation=s_saturation, shadows=s_shadows,
             )
         else:
-            custom_preview = None
+            custom_preview = apply_insta_adjustments(
+                work_img, brightness=s_brightness, contrast=s_contrast,
+                warmth=s_warmth, saturation=s_saturation, shadows=s_shadows,
+            )
 
-        col_preview, col_step1, col_step23 = st.columns([0.9, 1.1, 1], gap="medium")
+        col_preview, col_edit = st.columns([1, 1], gap="medium")
 
         with col_preview:
-            if custom_preview is not None:
-                display_img = custom_preview
-                display_caption = f"🎚️ プレビュー（{color_target}の色味・まだ保存されていません）"
-            else:
-                display_img = work_img
-                display_caption = "現在の写真"
-
-            st.image(display_img, caption=display_caption, use_container_width=True)
+            display_img = custom_preview if custom_preview is not None else work_img
+            cap_target = f"（{color_target}の色味）" if mask_ready else ""
+            st.image(display_img, caption=f"🎚️ プレビュー{cap_target}・まだ保存されていません", use_container_width=True)
 
             if custom_preview is not None:
                 if st.button("✅ このプレビューを保存する", key="apply_custom_top", use_container_width=True):
@@ -2004,7 +2005,6 @@ with tab_photo:
             with reset_col:
                 if st.button("↩️ 最初の状態に戻す", use_container_width=True):
                     st.session_state["_work_image"] = st.session_state["_original_image"].copy()
-                    st.session_state["_confirmed_food_mask"] = None
                     st.rerun()
             with dl_col:
                 buf = io.BytesIO()
@@ -2015,96 +2015,49 @@ with tab_photo:
                     use_container_width=True,
                 )
 
-        with col_step1:
-            # ==== STEP1：範囲を選んでお皿（料理）を検出 ====
-            st.markdown("**STEP1　🎯 お皿の範囲を選ぶ**")
-            st.caption("枠をドラッグして料理を囲むと、その中からGrabCutで輪郭を検出します（木の皿・手も自動で除外を試みます）")
-
-            if CROPPER_AVAILABLE:
-                # 列の幅からはみ出さないよう、cropperに渡す画像を縮小してから表示する。
-                # 選ばれた座標は縮小前の解像度に合わせてスケールし直す。
-                CROP_DISPLAY_MAX_W = 380
-                crop_scale = min(1.0, CROP_DISPLAY_MAX_W / work_img.width)
-                cropper_display_img = (
-                    work_img.resize((int(work_img.width * crop_scale), int(work_img.height * crop_scale)))
-                    if crop_scale < 1.0 else work_img
-                )
-
-                roi_box_raw = st_cropper(
-                    cropper_display_img, realtime_update=True, box_color="#FF6B6B",
-                    aspect_ratio=None, return_type="box",
-                    key=f"food_cropper_{st.session_state.get('_photo_version', 0)}",
-                    should_resize_image=False,
-                )
-                roi_box = (
-                    int(roi_box_raw["left"] / crop_scale), int(roi_box_raw["top"] / crop_scale),
-                    int((roi_box_raw["left"] + roi_box_raw["width"]) / crop_scale),
-                    int((roi_box_raw["top"] + roi_box_raw["height"]) / crop_scale),
-                )
-            else:
-                st.warning("⚠️ ドラッグ選択ライブラリが読み込めなかったため、スライダーで範囲を選んでください")
-                iw, ih = work_img.size
-                x_range = st.slider("横方向の範囲", 0, iw, (int(iw * 0.1), int(iw * 0.9)), key="roi_x")
-                y_range = st.slider("縦方向の範囲", 0, ih, (int(ih * 0.4), int(ih * 0.95)), key="roi_y")
-                roi_box = (x_range[0], y_range[0], x_range[1], y_range[1])
-                st.image(draw_selection_box(work_img, roi_box), caption="選択中の範囲", use_container_width=True)
-
-            if st.button("✅ この範囲でお皿を検出する", key="confirm_roi", use_container_width=True):
-                with st.spinner("🔍 GrabCutで料理の輪郭を検出しています..."):
-                    detected_mask = detect_food_mask_grabcut(work_img, roi_box)
-                st.session_state["_confirmed_food_mask"] = detected_mask
-                st.toast(f"お皿（料理）を検出しました（選択範囲内の約{float(detected_mask.mean())*100:.0f}%）", icon="✅")
-                st.rerun()
+        with col_edit:
+            # ==== 🎨 色味を変える ====
+            st.markdown("**🎨 色味を変える**")
 
             if mask_ready:
-                st.success("✅ 検出済み（STEP2・3が使えます）")
-            else:
-                st.info("👆 検出すると、右のSTEP2・3が使えます")
-
-        with col_step23:
-            # ==== STEP2：料理／それ以外の色味を変える ====
-            st.markdown("**STEP2　🎨 色味を変える**")
-            if not mask_ready:
-                st.caption("STEP1でお皿を検出すると使えるようになります")
-            else:
                 st.radio(
                     "どこの色味を変える？", ["🍽️ 料理", "🖼️ 料理以外（背景・人物など）"],
                     horizontal=True, key="color_target",
                 )
                 target_mask_for_preset = food_mask if st.session_state.get("color_target", "🍽️ 料理") == "🍽️ 料理" else (1.0 - food_mask)
 
-                preset_cols = st.columns(3)
-                preset_params = {
-                    "muted_warm": ("🍂 低彩度暖色", dict(brightness=10, contrast=-5, warmth=10, saturation=-10, shadows=5)),
-                    "natural_vivid": ("🌿 彩度高め", dict(brightness=5, contrast=10, warmth=0, saturation=28, shadows=-5)),
-                    "reduce_blue": ("🔥 青み削り", dict(brightness=0, contrast=0, warmth=28, saturation=5, shadows=0)),
-                }
-                for i, (style_key, (label, params)) in enumerate(preset_params.items()):
-                    with preset_cols[i]:
-                        if st.button(label, key=f"preset_{style_key}", use_container_width=True):
+            preset_cols = st.columns(3)
+            preset_params = {
+                "muted_warm": ("🍂 低彩度暖色", dict(brightness=10, contrast=-5, warmth=10, saturation=-10, shadows=5)),
+                "natural_vivid": ("🌿 彩度高め", dict(brightness=5, contrast=10, warmth=0, saturation=28, shadows=-5)),
+                "reduce_blue": ("🔥 青み削り", dict(brightness=0, contrast=0, warmth=28, saturation=5, shadows=0)),
+            }
+            for i, (style_key, (label, params)) in enumerate(preset_params.items()):
+                with preset_cols[i]:
+                    if st.button(label, key=f"preset_{style_key}", use_container_width=True):
+                        if mask_ready:
                             st.session_state["_work_image"] = apply_adjustments_to_mask(work_img, target_mask_for_preset, **params)
-                            st.rerun()
-
-                with st.expander("🎚️ カスタム調整", expanded=False):
-                    st.slider("明るさ", -100, 100, 10, key="s_brightness")
-                    st.slider("コントラスト", -100, 100, -5, key="s_contrast")
-                    st.slider("暖かさ", -100, 100, 10, key="s_warmth")
-                    st.slider("彩度", -100, 100, -10, key="s_saturation")
-                    st.slider("シャドウ", -100, 100, 5, key="s_shadows")
-                    if st.button("✅ この色味で保存する", key="apply_custom", use_container_width=True):
-                        st.session_state["_work_image"] = custom_preview
+                        else:
+                            st.session_state["_work_image"] = apply_insta_adjustments(work_img, **params)
                         st.rerun()
+
+            with st.expander("🎚️ カスタム調整", expanded=False):
+                st.slider("明るさ", -100, 100, 10, key="s_brightness")
+                st.slider("コントラスト", -100, 100, -5, key="s_contrast")
+                st.slider("暖かさ", -100, 100, 10, key="s_warmth")
+                st.slider("彩度", -100, 100, -10, key="s_saturation")
+                st.slider("シャドウ", -100, 100, 5, key="s_shadows")
+                if st.button("✅ この色味で保存する", key="apply_custom", use_container_width=True):
+                    st.session_state["_work_image"] = custom_preview
+                    st.rerun()
 
             st.divider()
 
-            # ==== STEP3：モザイク（お皿の外側／顔のどちらか一方だけ） ====
-            st.markdown("**STEP3　🧩 モザイク処理**")
+            # ==== 🧩 モザイク処理 ====
+            st.markdown("**🧩 モザイク処理**")
             if not CV2_AVAILABLE or _FACE_CASCADE is None:
                 st.warning("⚠️ この環境では画像検出ライブラリ（OpenCV）を読み込めなかったため使用できません")
             else:
-                st.caption("どちらか一方だけを選べます（選び直すと、もう片方は自動的に外れます）")
-                if mask_ready:
-                    st.caption("💡「お皿の外側」はSTEP1で確定した範囲をそのまま使うので、精度が高くなります")
                 mosaic_target = st.radio(
                     "モザイクの対象",
                     ["モザイクなし", "🍽️ お皿の外側をモザイク", "🙈 顔だけモザイク"],
@@ -2120,10 +2073,9 @@ with tab_photo:
                         if mosaic_target == "🍽️ お皿の外側をモザイク":
                             plate_block = 26 if is_coarse else 10
                             if mask_ready:
-                                # STEP1で確定した精密なマスク（GrabCut＋輪郭検出）をそのまま使う
                                 result_img = mosaic_outside_mask(work_img, food_mask, block=plate_block)
                             else:
-                                with st.spinner("🔍 Hough変換でお皿を検出中..."):
+                                with st.spinner("🔍 お皿を自動検出中..."):
                                     result_img, detected = mosaic_background_outside_plate(work_img, block=plate_block)
                         else:
                             face_divisor = 4 if is_coarse else 14
