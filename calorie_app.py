@@ -713,6 +713,42 @@ def mosaic_background_outside_plate(image, block=18):
     return Image.fromarray(out.astype(np.uint8)), detected
 
 # ================================================================
+# 【自作のCV処理】料理だけを「美味しそうな色味」に補正する
+# ----------------------------------------------------------------
+# 料理写真と人物写真では「映える色」の方向性が違う（料理は彩度・暖色を
+# 強めるほど美味しそうに見えるが、同じ補正を肌にかけると不自然になる）。
+# そこで detect_plate_region で検出したお皿の内側だけに強めの補正をかけ、
+# それ以外（人物・背景）は元のまま残す。境界は自作のグラデーションマスク
+# でぼかし（フェザリング）、継ぎ目が目立たないようにしている。
+# ================================================================
+
+def enhance_food_only(image, brightness=8, contrast=12, warmth=18, saturation=32, shadows=8, feather=0.18):
+    """お皿の中（料理）だけを美味しそうな色味に補正し、それ以外は元のままにする"""
+    image = image.convert("RGB")
+    arr = np.asarray(image).astype(np.float32)
+    h, w = arr.shape[:2]
+
+    cx, cy, rx, ry, method = detect_plate_region(image)
+
+    # 料理向けの強めの補正（彩度・暖かさ・コントラストを強めにかける）
+    enhanced = apply_insta_adjustments(
+        image, brightness=brightness, contrast=contrast,
+        warmth=warmth, saturation=saturation, shadows=shadows,
+    )
+    enhanced_arr = np.asarray(enhanced).astype(np.float32)
+
+    # ---- 楕円マスクを自作し、境界をなめらかにフェザリング（ぼかし）する ----
+    y_idx, x_idx = np.ogrid[:h, :w]
+    norm_dist = np.sqrt(((x_idx - cx) / rx) ** 2 + ((y_idx - cy) / ry) ** 2)
+    # norm_dist <= 1 が皿の内側。境界付近(1±feather)を線形に滑らかにする
+    mask = np.clip((1.0 + feather - norm_dist) / (2 * feather), 0, 1)
+    mask = mask[..., None]
+
+    out = arr * (1 - mask) + enhanced_arr * mask
+    detected = method != "fallback"
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)), detected
+
+# ================================================================
 # 【CV処理】人物の顔検出（Haar Cascade / Viola-Jones法）とモザイク
 # ----------------------------------------------------------------
 # 料理写真に人が写り込んでいた場合、プライバシー保護のため顔だけを
@@ -756,6 +792,58 @@ def mosaic_faces(image, block_divisor=8):
         pixelated = np.array(pixelate(Image.fromarray(region), block=max(4, fw // block_divisor)))
         arr[y0:y1, x0:x1] = pixelated
     return Image.fromarray(arr), len(faces)
+
+# ================================================================
+# 【自作のCV処理】料理と人物、それぞれに合う色味を別々にかける
+# ----------------------------------------------------------------
+# 「料理を美味しそうに見せる色味」（暖色・彩度高め・コントラスト強め）と
+# 「人の肌を自然に見せる色味」（彩度控えめ・柔らかいトーン・影を持ち上げる）は
+# 本来は逆方向の処理。お皿検出と顔検出を組み合わせ、同じ写真の中で
+# 領域ごとに異なる色調整を適用する。マスクの境界はぼかして自然に繋げる。
+# ================================================================
+
+def region_aware_food_portrait_enhance(image):
+    """お皿の領域には食欲をそそる色味、顔の領域には自然で優しい色味をかける"""
+    image = image.convert("RGB")
+    arr = np.asarray(image).astype(np.float32)
+    h, w = arr.shape[:2]
+
+    # ---- 料理領域のマスク（お皿検出を流用） ----
+    cx, cy, rx, ry, _ = detect_plate_region(image)
+    y_idx, x_idx = np.ogrid[:h, :w]
+    food_mask = (((x_idx - cx) / rx) ** 2 + ((y_idx - cy) / ry) ** 2 <= 1.0).astype(np.float32)
+
+    # ---- 顔領域のマスク（Haar Cascadeを流用、少し広めに） ----
+    face_mask = np.zeros((h, w), dtype=np.float32)
+    n_faces = 0
+    if CV2_AVAILABLE and _FACE_CASCADE is not None:
+        faces = detect_faces(image)
+        n_faces = len(faces)
+        for (fx, fy, fw, fh) in faces:
+            pad = int(0.25 * fw)
+            x0, y0 = max(0, fx - pad), max(0, fy - pad)
+            x1, y1 = min(w, fx + fw + pad), min(h, fy + fh + pad)
+            face_mask[y0:y1, x0:x1] = 1.0
+
+    # マスクの境界をぼかして自然に繋げる（継ぎ目を作らない）
+    food_mask = cv2.GaussianBlur(food_mask, (31, 31), 0)
+    face_mask = cv2.GaussianBlur(face_mask, (31, 31), 0)
+    food_mask = food_mask * (1 - face_mask)  # 顔とお皿が重なる場合は顔を優先
+
+    # ---- 料理向け：彩度・暖かさ・コントラストを強めて食欲をそそる発色に ----
+    food_arr = np.asarray(
+        apply_insta_adjustments(image, brightness=5, contrast=15, warmth=12, saturation=30, shadows=-5)
+    ).astype(np.float32)
+
+    # ---- 人物向け：彩度は抑えめ、シャドウを持ち上げて肌を優しく見せる ----
+    portrait_arr = np.asarray(
+        apply_insta_adjustments(image, brightness=8, contrast=-8, warmth=4, saturation=-12, shadows=15)
+    ).astype(np.float32)
+
+    out = (arr * (1 - food_mask - face_mask)[..., None]
+           + food_arr * food_mask[..., None]
+           + portrait_arr * face_mask[..., None])
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)), n_faces
 
 def estimate_calories_gemini(image):
     prompt = """この写真に写っている料理をすべて認識してください。
@@ -1458,106 +1546,115 @@ with tab5:
         "加工したい写真を選ぶ", type=["jpg", "jpeg", "png", "webp"], key="edit_tab_uploader"
     )
     if edit_upload is not None:
-        st.session_state["_last_uploaded_image"] = Image.open(edit_upload).convert("RGB")
-        st.session_state["_photo_style"] = None
+        # アップロードした瞬間、選び直すまで同じ画像を使い回す
+        new_bytes = edit_upload.getvalue()
+        if st.session_state.get("_edit_upload_bytes") != new_bytes:
+            st.session_state["_last_uploaded_image"] = Image.open(edit_upload).convert("RGB")
+            st.session_state["_edit_upload_bytes"] = new_bytes
 
-    if st.session_state.get("_last_uploaded_image") is None:
+    src_img = st.session_state.get("_last_uploaded_image")
+
+    if src_img is None:
         st.info("📸 上のアップロード欄から写真を選ぶか、「食事を記録」タブで写真を分析すると、ここで加工できます")
     else:
-        st.markdown("フィルター（プリセット）")
-        style_labels = {
-            "muted_warm": "🍂 低彩度・暖色寄り",
-            "natural_vivid": "🌿 自然な彩度高め",
-            "reduce_blue": "🔥 青み削り",
-        }
-        style_cols = st.columns(3)
-        for i, (style_key, label) in enumerate(style_labels.items()):
-            with style_cols[i]:
-                if st.button(label, key=f"style_{style_key}", use_container_width=True):
-                    st.session_state["_photo_style"] = style_key
+        # ---- 左：プレビュー／右：操作パネル を横並びにして1画面に収める ----
+        col_preview, col_controls = st.columns([1, 1], gap="medium")
 
-        with st.expander("🎚️ カスタム調整（スライダーで自分好みに）", expanded=False):
-            st.caption("インスタの編集機能と同じ-100〜100のスライダーです。動かすとプレビューが更新されます")
-            slide_col1, slide_col2 = st.columns(2)
-            with slide_col1:
+        with col_controls:
+            mode = st.radio(
+                "加工モード",
+                ["元の写真", "🍽️ 料理だけ美味しそうに", "🍂 低彩度・暖色寄り", "🌿 自然な彩度高め", "🔥 青み削り",
+                 "🎚️ カスタム調整", "🍽️ お皿検出モザイク", "🙈 顔モザイク",
+                 "🍽️👤 料理と人、それぞれに合う色味"],
+                key="edit_mode",
+            )
+
+            if mode == "🎚️ カスタム調整":
+                st.caption("インスタの編集機能と同じ-100〜100のスライダーです。動かすと右のプレビューが即座に変わります")
                 s_brightness = st.slider("明るさ", -100, 100, 10, key="s_brightness")
                 s_contrast = st.slider("コントラスト", -100, 100, -5, key="s_contrast")
                 s_warmth = st.slider("暖かさ", -100, 100, 10, key="s_warmth")
-            with slide_col2:
                 s_saturation = st.slider("彩度", -100, 100, -10, key="s_saturation")
                 s_shadows = st.slider("シャドウ", -100, 100, 5, key="s_shadows")
-            if st.button("🎨 このスライダーで加工する", key="apply_custom", use_container_width=True):
-                st.session_state["_photo_style"] = "custom"
 
-        st.markdown("検出して加工")
-        if not CV2_AVAILABLE or _FACE_CASCADE is None:
-            st.warning(
-                "⚠️ この環境では画像検出ライブラリ（OpenCV）を読み込めなかったため、"
-                "「お皿検出」「顔検出」機能は現在使用できません。フィルターは通常通り使えます。"
+            if mode in ("🍽️ お皿検出モザイク", "🙈 顔モザイク"):
+                if not CV2_AVAILABLE or _FACE_CASCADE is None:
+                    st.warning(
+                        "⚠️ この環境では画像検出ライブラリ（OpenCV）を読み込めなかったため、"
+                        "この機能は現在使用できません。"
+                    )
+                else:
+                    mosaic_grain = st.radio(
+                        "モザイクの粗さ", ["🔲 荒め", "🔳 細かめ"],
+                        horizontal=True, key="mosaic_grain",
+                    )
+
+        # ---- プレビューを常に自動計算（ボタン不要・選択/スライダー変更で即反映） ----
+        detect_note = None
+        is_coarse = st.session_state.get("mosaic_grain", "🔲 荒め") == "🔲 荒め"
+
+        if mode == "元の写真":
+            edited = src_img
+        elif mode == "🍽️ 料理だけ美味しそうに":
+            with col_preview:
+                with st.spinner("🔍 お皿を検出して、料理だけ色味を補正しています..."):
+                    edited, plate_detected = enhance_food_only(src_img)
+            detect_note = "✅ お皿を検出し、料理部分だけ食欲をそそる発色に補正しました" if plate_detected else "⚠️ お皿を検出できず、画面下側を目安に補正しました"
+        elif mode == "🎚️ カスタム調整":
+            edited = apply_insta_adjustments(
+                src_img,
+                brightness=st.session_state.get("s_brightness", 10),
+                contrast=st.session_state.get("s_contrast", -5),
+                warmth=st.session_state.get("s_warmth", 10),
+                saturation=st.session_state.get("s_saturation", -10),
+                shadows=st.session_state.get("s_shadows", 5),
+            )
+        elif mode == "🍽️ お皿検出モザイク":
+            if not CV2_AVAILABLE or _FACE_CASCADE is None:
+                edited = src_img
+            else:
+                plate_block = 26 if is_coarse else 10
+                with col_preview:
+                    with st.spinner("🔍 Hough変換でお皿の形（円）を検出中..."):
+                        edited, plate_detected = mosaic_background_outside_plate(src_img, block=plate_block)
+                detect_note = "✅ 円形のお皿を検出しました" if plate_detected else "⚠️ お皿の形を検出できず、中央を基準にモザイク化しました"
+        elif mode == "🙈 顔モザイク":
+            if not CV2_AVAILABLE or _FACE_CASCADE is None:
+                edited = src_img
+            else:
+                face_divisor = 4 if is_coarse else 14
+                with col_preview:
+                    with st.spinner("🔍 Haar Cascadeで顔を検出中..."):
+                        edited, n_faces = mosaic_faces(src_img, block_divisor=face_divisor)
+                detect_note = f"✅ {n_faces}件の顔を検出してモザイク化しました" if n_faces > 0 else "人の顔は検出されませんでした（そのままの写真です）"
+        elif mode == "🍽️👤 料理と人、それぞれに合う色味":
+            with col_preview:
+                with st.spinner("🔍 お皿と顔を検出して、領域ごとに色味を変えています..."):
+                    edited, n_faces = region_aware_food_portrait_enhance(src_img)
+            detect_note = (
+                f"✅ 料理は食欲をそそる発色に、人物（{n_faces}件検出）の肌は自然な色味に分けて加工しました"
+                if n_faces > 0 else
+                "✅ 料理部分は食欲をそそる発色に加工しました（顔は検出されませんでした）"
             )
         else:
-            mosaic_grain = st.radio(
-                "モザイクの粗さ", ["🔲 荒め", "🔳 細かめ"],
-                horizontal=True, key="mosaic_grain",
-            )
-            is_coarse = mosaic_grain == "🔲 荒め"
+            style_key_map = {
+                "🍂 低彩度・暖色寄り": "muted_warm",
+                "🌿 自然な彩度高め": "natural_vivid",
+                "🔥 青み削り": "reduce_blue",
+            }
+            edited = generate_instagram_photo(src_img, style_key_map[mode])
 
-            detect_cols = st.columns(2)
-            with detect_cols[0]:
-                if st.button("🍽️ お皿だけ残して背景モザイク", key="style_plate", use_container_width=True):
-                    st.session_state["_photo_style"] = "plate"
-            with detect_cols[1]:
-                if st.button("🙈 人の顔だけモザイク", key="style_face", use_container_width=True):
-                    st.session_state["_photo_style"] = "face"
-
-        chosen_style = st.session_state.get("_photo_style")
-        if chosen_style in ("plate", "face") and (not CV2_AVAILABLE or _FACE_CASCADE is None):
-            chosen_style = None  # 検出系が使えない環境では選択をリセット
-
-        if chosen_style:
-            src_img = st.session_state["_last_uploaded_image"]
-            detect_note = None
-
-            if chosen_style == "plate":
-                plate_block = 26 if is_coarse else 10
-                with st.spinner("🔍 Hough変換でお皿の形（円）を検出中..."):
-                    edited, plate_detected = mosaic_background_outside_plate(src_img, block=plate_block)
-                caption = "加工後（お皿の外側をモザイク化）"
-                detect_note = "✅ 円形のお皿を検出しました" if plate_detected else "⚠️ お皿の形を検出できず、中央を基準にモザイク化しました"
-            elif chosen_style == "face":
-                face_divisor = 4 if is_coarse else 14
-                with st.spinner("🔍 Haar Cascadeで顔を検出中..."):
-                    edited, n_faces = mosaic_faces(src_img, block_divisor=face_divisor)
-                caption = "加工後（顔をモザイク化）"
-                detect_note = f"✅ {n_faces}件の顔を検出してモザイク化しました" if n_faces > 0 else "人の顔は検出されませんでした（そのままの写真です）"
-            elif chosen_style == "custom":
-                edited = apply_insta_adjustments(
-                    src_img,
-                    brightness=st.session_state.get("s_brightness", 10),
-                    contrast=st.session_state.get("s_contrast", -5),
-                    warmth=st.session_state.get("s_warmth", 10),
-                    saturation=st.session_state.get("s_saturation", -10),
-                    shadows=st.session_state.get("s_shadows", 5),
-                )
-                caption = "加工後（カスタム調整）"
-            else:
-                edited = generate_instagram_photo(src_img, chosen_style)
-                caption = f"加工後（{style_labels[chosen_style]}）"
-
-            edit_col1, edit_col2 = st.columns(2)
-            with edit_col1:
-                st.image(src_img, caption="元の写真", use_container_width=True)
-            with edit_col2:
-                st.image(edited, caption=caption, use_container_width=True)
+        with col_preview:
+            st.image(edited, caption=f"プレビュー（{mode}）", use_container_width=True)
             if detect_note:
                 st.caption(detect_note)
 
             buf = io.BytesIO()
-            edited.save(buf, format="JPEG", quality=92)
+            edited.convert("RGB").save(buf, format="JPEG", quality=92)
             st.download_button(
-                "⬇️ 加工した写真をダウンロード",
+                "⬇️ この写真をダウンロード",
                 data=buf.getvalue(),
-                file_name=f"mogureco_{chosen_style}.jpg",
+                file_name="mogureco_edited.jpg",
                 mime="image/jpeg",
                 use_container_width=True,
             )
