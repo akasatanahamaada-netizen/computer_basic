@@ -1073,17 +1073,23 @@ def suggest_food_box_with_gemini(image, max_dim=384):
     Geminiに、写真の中で「皿ではなく料理そのもの」が写っているおおよその
     矩形を提案してもらう。画像を小さく縮小して送るため、通常の料理認識
     （estimate_calories_gemini）よりトークン消費はかなり少ない。
+
+    Geminiは物体検出の座標を独自の形式で学習済みのため、それに合わせる：
+      ・"box_2d"というキー名で聞く（Geminiが物体検出だと認識しやすい）
+      ・順序は [y_min, x_min, y_max, x_max]（xではなくyが先）
+      ・範囲は0〜1000に正規化（0〜1ではない）
+    この形式に合わせないと、座標が大きくずれることが分かっている。
+
     戻り値: (x0, y0, x1, y1) 元画像のピクセル座標
     """
     small = image.convert("RGB").copy()
     small.thumbnail((max_dim, max_dim))  # トークン節約：送る画像を小さくする
 
     prompt = (
-        "この写真の中で、皿・器・テーブルではなく「料理（食べ物）そのもの」が"
-        "写っているおおよその範囲を教えてください。皿の縁は含めないでください。\n"
-        "画像の左上を(0,0)、右下を(1,1)として正規化した座標で、"
-        "次のJSON形式だけを返してください。説明文は不要です。\n"
-        '{"x0":0.0,"y0":0.0,"x1":1.0,"y1":1.0}'
+        "Detect the food (not the plate, bowl, or table) in this image. "
+        "Output a JSON object with a single key \"box_2d\" containing "
+        "[y_min, x_min, y_max, x_max], normalized to 0-1000. "
+        "No explanation, JSON only."
     )
     model = genai.GenerativeModel("models/gemini-2.5-flash-lite")
     response = model.generate_content([prompt, small])
@@ -1091,11 +1097,12 @@ def suggest_food_box_with_gemini(image, max_dim=384):
     text = re.sub(r'^```json|```$', '', text, flags=re.MULTILINE).strip()
     data = json.loads(text)
 
-    w, h = image.size  # 正規化座標なので、実際の解像度に合わせて計算し直す
-    x0 = int(max(0.0, min(1.0, float(data["x0"]))) * w)
-    y0 = int(max(0.0, min(1.0, float(data["y0"]))) * h)
-    x1 = int(max(0.0, min(1.0, float(data["x1"]))) * w)
-    y1 = int(max(0.0, min(1.0, float(data["y1"]))) * h)
+    y_min, x_min, y_max, x_max = data["box_2d"]
+    w, h = image.size  # 0〜1000正規化なので、実際の解像度に合わせて計算し直す
+    x0 = int(max(0, min(1000, x_min)) / 1000 * w)
+    y0 = int(max(0, min(1000, y_min)) / 1000 * h)
+    x1 = int(max(0, min(1000, x_max)) / 1000 * w)
+    y1 = int(max(0, min(1000, y_max)) / 1000 * h)
     if x1 <= x0: x1 = min(w, x0 + 10)
     if y1 <= y0: y1 = min(h, y0 + 10)
     return (x0, y0, x1, y1)
