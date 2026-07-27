@@ -859,7 +859,40 @@ def detect_food_mask_grabcut(image, roi_box, iterations=8):
         return mask_fallback
 
     food_mask = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 1.0, 0.0).astype(np.float32)
-    return food_mask
+    return refine_mask_with_contours(food_mask)
+
+def refine_mask_with_contours(mask):
+    """
+    GrabCutの結果を、輪郭検出を使ってきれいに整える後処理。
+    グレースケールの2値マスクに対して：
+      ①floodFillで内部の小さな穴を埋める
+      ②最大の輪郭だけを残し、孤立した小さな誤検出（ノイズ）を除去する
+      ③モルフォロジー処理で輪郭のギザギザを滑らかにする
+    """
+    mask_u8 = (mask * 255).astype(np.uint8)
+    h, w = mask_u8.shape
+    if mask_u8.max() == 0:
+        return mask
+
+    # ① 穴を先に埋める（外周から塗って、届かない場所=内部の穴とみなす）
+    ff = mask_u8.copy()
+    ff_mask = np.zeros((h + 2, w + 2), np.uint8)
+    cv2.floodFill(ff, ff_mask, (0, 0), 255)
+    holes_filled = cv2.bitwise_not(ff)
+    filled = mask_u8 | holes_filled
+
+    # ② 最大の輪郭だけを残す（孤立ノイズを除去）
+    contours, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return mask
+    largest = max(contours, key=cv2.contourArea)
+    cleaned = np.zeros_like(mask_u8)
+    cv2.drawContours(cleaned, [largest], -1, 255, thickness=cv2.FILLED)
+
+    # ③ 輪郭を滑らかにする
+    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+
+    return (cleaned > 127).astype(np.float32)
 
 def detect_food_mask_from_scribbles(image, food_scribble_mask, bg_scribble_mask, iterations=8):
     """
