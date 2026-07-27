@@ -1221,6 +1221,43 @@ def region_aware_food_portrait_enhance(image):
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)), n_faces
 
 
+def detect_food_region_gemini(image):
+    """
+    Gemini AIに画像を渡し、料理が写っている領域のバウンディングボックスを取得する。
+    CVの色・形ベースの検出では難しい柄のある皿や複雑な構図でも、
+    AIが「料理」を意味レベルで認識するため精度が高い。
+
+    戻り値: (x0, y0, x1, y1) のタプル。検出失敗時は None。
+    座標は元画像のピクセル単位。
+    """
+    prompt = """この写真に写っている料理（お皿ごと）の位置を教えてください。
+料理が載っているお皿全体を囲む矩形の座標を、画像の幅・高さに対する割合（0.0〜1.0）で返してください。
+複数のお皿がある場合は、最も大きく写っているもの1つだけを選んでください。
+
+以下のJSON形式のみで返してください。他のテキストは不要です。
+
+{"x0": 左端の割合, "y0": 上端の割合, "x1": 右端の割合, "y1": 下端の割合}
+
+例: {"x0": 0.15, "y0": 0.25, "x1": 0.85, "y1": 0.90}"""
+
+    try:
+        model = genai.GenerativeModel("models/gemini-2.5-flash-lite")
+        response = model.generate_content([prompt, image])
+        result = response.text.strip()
+        result = re.sub(r'^```json|```$', '', result, flags=re.MULTILINE).strip()
+        data = json.loads(result)
+        iw, ih = image.size
+        x0 = max(0, int(float(data["x0"]) * iw))
+        y0 = max(0, int(float(data["y0"]) * ih))
+        x1 = min(iw, int(float(data["x1"]) * iw))
+        y1 = min(ih, int(float(data["y1"]) * ih))
+        if x1 - x0 > 20 and y1 - y0 > 20:
+            return (x0, y0, x1, y1)
+        return None
+    except Exception:
+        return None
+
+
 def estimate_calories_gemini(image):
     prompt = """この写真に写っている料理をすべて認識してください。
 カロリーや栄養素は、写真に写っている実際の量に基づいて推定してください。
@@ -1954,18 +1991,26 @@ with tab_photo:
             st.session_state.pop(_k, None)
         st.session_state["_photo_version"] = st.session_state.get("_photo_version", 0) + 1
         # 自動でお皿（料理）を検出してマスクを生成する
+        # Gemini AI → CV検出 の優先順でROIを決定し、GrabCutで精密マスクを作る
         if CV2_AVAILABLE:
-            # まず detect_plate_region でお皿のおおまかな位置を特定し、
-            # その周辺を ROI として GrabCut に渡す
             iw, ih = new_source_img.size
-            cx, cy, rx, ry, method = detect_plate_region(new_source_img)
-            # 検出した楕円をやや広めに囲む矩形を ROI にする
-            margin = 1.3
-            auto_x0 = max(0, int(cx - rx * margin))
-            auto_y0 = max(0, int(cy - ry * margin))
-            auto_x1 = min(iw, int(cx + rx * margin))
-            auto_y1 = min(ih, int(cy + ry * margin))
-            auto_roi = (auto_x0, auto_y0, auto_x1, auto_y1)
+            auto_roi = None
+
+            # ① Gemini AIで料理の位置を検出（最も正確）
+            if gemini_ready:
+                auto_roi = detect_food_region_gemini(new_source_img)
+
+            # ② Geminiが使えない/失敗した場合はCV検出にフォールバック
+            if auto_roi is None:
+                cx, cy, rx, ry, method = detect_plate_region(new_source_img)
+                margin = 1.3
+                auto_roi = (
+                    max(0, int(cx - rx * margin)),
+                    max(0, int(cy - ry * margin)),
+                    min(iw, int(cx + rx * margin)),
+                    min(ih, int(cy + ry * margin)),
+                )
+
             st.session_state["_confirmed_food_mask"] = detect_food_mask_grabcut(new_source_img, auto_roi)
         else:
             st.session_state["_confirmed_food_mask"] = None
