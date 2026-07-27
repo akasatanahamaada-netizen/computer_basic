@@ -1,7 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
 import requests
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageDraw
 import numpy as np
 import json
 import re
@@ -721,6 +721,69 @@ def mosaic_background_outside_plate(image, block=18):
 # それ以外（人物・背景）は元のまま残す。境界は自作のグラデーションマスク
 # でぼかし（フェザリング）、継ぎ目が目立たないようにしている。
 # ================================================================
+
+# ================================================================
+# 【自作のCV処理】ユーザー選択領域からのGrabCutによる料理輪郭抽出
+# ----------------------------------------------------------------
+# お皿の自動検出（色・Hough変換）は照明や構図によって難しいことがある。
+# そこでユーザーが大まかな矩形範囲を選び、そこからGrabCutアルゴリズム
+# （対話的前景／背景分離の古典的CV手法）で料理の輪郭を精密に抽出する。
+# ================================================================
+
+def detect_food_mask_grabcut(image, roi_box, iterations=5):
+    """
+    ユーザーが選んだ大まかな矩形(roi_box)から、GrabCutで料理の輪郭を
+    精密に抽出し、0〜1のマスク（numpy配列）を返す。
+    roi_box: (x0, y0, x1, y1) 画像のピクセル座標
+    """
+    arr = np.asarray(image.convert("RGB"))
+    h, w = arr.shape[:2]
+    x0, y0, x1, y1 = roi_box
+    x0, y0 = max(0, min(x0, w - 2)), max(0, min(y0, h - 2))
+    x1, y1 = max(x0 + 1, min(x1, w - 1)), max(y0 + 1, min(y1, h - 1))
+    rect = (x0, y0, x1 - x0, y1 - y0)
+
+    mask = np.zeros((h, w), np.uint8)
+    bgd_model = np.zeros((1, 65), np.float64)
+    fgd_model = np.zeros((1, 65), np.float64)
+
+    try:
+        cv2.grabCut(arr, mask, rect, bgd_model, fgd_model, iterations, cv2.GC_INIT_WITH_RECT)
+    except Exception:
+        # 極端に小さい範囲などでGrabCutが失敗した場合は、矩形そのものをマスクにする
+        mask_fallback = np.zeros((h, w), np.float32)
+        mask_fallback[y0:y1, x0:x1] = 1.0
+        return mask_fallback
+
+    food_mask = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 1.0, 0.0).astype(np.float32)
+    return food_mask
+
+def enhance_food_in_selection(image, roi_box, brightness=8, contrast=12, warmth=18, saturation=32, shadows=8):
+    """ユーザーが選んだ範囲からGrabCutで料理の輪郭を検出し、その部分だけ美味しそうな色味に補正する"""
+    image = image.convert("RGB")
+    arr = np.asarray(image).astype(np.float32)
+
+    food_mask = detect_food_mask_grabcut(image, roi_box)
+    # 境界をぼかして自然に合成する（フェザリング）
+    food_mask_blurred = cv2.GaussianBlur(food_mask, (25, 25), 0)
+
+    enhanced = apply_insta_adjustments(
+        image, brightness=brightness, contrast=contrast,
+        warmth=warmth, saturation=saturation, shadows=shadows,
+    )
+    enhanced_arr = np.asarray(enhanced).astype(np.float32)
+
+    mask3 = food_mask_blurred[..., None]
+    out = arr * (1 - mask3) + enhanced_arr * mask3
+    coverage = float(food_mask.mean())
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)), coverage
+
+def draw_selection_box(image, roi_box, color=(255, 107, 107), width=4):
+    """選択中の矩形をプレビュー用に描画する"""
+    img = image.convert("RGB").copy()
+    draw = ImageDraw.Draw(img)
+    draw.rectangle(roi_box, outline=color, width=width)
+    return img
 
 def enhance_food_only(image, brightness=8, contrast=12, warmth=18, saturation=32, shadows=8, feather=0.18):
     """お皿の中（料理）だけを美味しそうな色味に補正し、それ以外は元のままにする"""
@@ -1563,11 +1626,18 @@ with tab5:
         with col_controls:
             mode = st.radio(
                 "加工モード",
-                ["元の写真", "🍽️ 料理だけ美味しそうに", "🍂 低彩度・暖色寄り", "🌿 自然な彩度高め", "🔥 青み削り",
+                ["元の写真", "🎯 範囲を選んで料理を補正", "🍽️ 料理だけ美味しそうに",
+                 "🍂 低彩度・暖色寄り", "🌿 自然な彩度高め", "🔥 青み削り",
                  "🎚️ カスタム調整", "🍽️ お皿検出モザイク", "🙈 顔モザイク",
                  "🍽️👤 料理と人、それぞれに合う色味"],
                 key="edit_mode",
             )
+
+            if mode == "🎯 範囲を選んで料理を補正":
+                st.caption("スライダーで料理を囲む大まかな範囲を選ぶと、そこからAIなしで輪郭を自動検出します")
+                iw, ih = src_img.size
+                x_range = st.slider("横方向の範囲", 0, iw, (int(iw * 0.1), int(iw * 0.9)), key="roi_x")
+                y_range = st.slider("縦方向の範囲", 0, ih, (int(ih * 0.4), int(ih * 0.95)), key="roi_y")
 
             if mode == "🎚️ カスタム調整":
                 st.caption("インスタの編集機能と同じ-100〜100のスライダーです。動かすと右のプレビューが即座に変わります")
@@ -1595,6 +1665,22 @@ with tab5:
 
         if mode == "元の写真":
             edited = src_img
+        elif mode == "🎯 範囲を選んで料理を補正":
+            roi_box = (
+                st.session_state.get("roi_x", (0, src_img.width))[0],
+                st.session_state.get("roi_y", (0, src_img.height))[0],
+                st.session_state.get("roi_x", (0, src_img.width))[1],
+                st.session_state.get("roi_y", (0, src_img.height))[1],
+            )
+            with col_preview:
+                st.image(
+                    draw_selection_box(src_img, roi_box),
+                    caption="選択中の範囲（赤い枠）",
+                    use_container_width=True,
+                )
+            with st.spinner("🔍 GrabCutで料理の輪郭を検出しています..."):
+                edited, coverage = enhance_food_in_selection(src_img, roi_box)
+            detect_note = f"✅ 選んだ範囲の中から、料理らしき部分（面積の約{coverage*100:.0f}%）を検出して補正しました"
         elif mode == "🍽️ 料理だけ美味しそうに":
             with col_preview:
                 with st.spinner("🔍 お皿を検出して、料理だけ色味を補正しています..."):
