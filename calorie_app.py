@@ -772,25 +772,81 @@ def mosaic_background_outside_plate(image, block=18):
 # （対話的前景／背景分離の古典的CV手法）で料理の輪郭を精密に抽出する。
 # ================================================================
 
-def detect_food_mask_grabcut(image, roi_box, iterations=5):
+def _sample_border_color(arr, x0, y0, x1, y1, margin_ratio=0.10):
+    """選択範囲の縁（外周の帯）の色を平均し、皿の色の目安にする（木の皿・色つきの皿にも対応）"""
+    bw, bh = x1 - x0, y1 - y0
+    mx, my = max(3, int(bw * margin_ratio)), max(3, int(bh * margin_ratio))
+    strips = [
+        arr[y0:y0 + my, x0:x1], arr[y1 - my:y1, x0:x1],
+        arr[y0:y1, x0:x0 + mx], arr[y0:y1, x1 - mx:x1],
+    ]
+    pixels = np.concatenate([s.reshape(-1, 3) for s in strips if s.size > 0], axis=0)
+    return pixels.mean(axis=0)
+
+def _skin_mask(arr):
+    """肌色らしい領域を検出する（YCrCb色空間の定番の肌色範囲。手・指の除外用）"""
+    ycrcb = cv2.cvtColor(arr, cv2.COLOR_RGB2YCrCb)
+    cr, cb = ycrcb[:, :, 1], ycrcb[:, :, 2]
+    return (cr >= 133) & (cr <= 178) & (cb >= 77) & (cb <= 127)
+
+def detect_food_mask_grabcut(image, roi_box, iterations=8):
     """
-    ユーザーが選んだ大まかな矩形(roi_box)から、GrabCutで料理の輪郭を
-    精密に抽出し、0〜1のマスク（numpy配列）を返す。
-    roi_box: (x0, y0, x1, y1) 画像のピクセル座標
+    ユーザーが選んだ大まかな矩形(roi_box)から、GrabCutで料理の輪郭を精密に抽出する。
+
+    素朴に「矩形の中＝前景」とするだけでは、以下のケースで誤判定しやすい：
+      ・お皿ぴったりに枠を選んだ場合（背景の手がかりが枠内にない）
+      ・木製など「白くない」皿（明るさ・彩度だけの判定では皿と気づけない）
+      ・皿を手で持っている場合（指や手のひらが料理と誤認識される）
+    そこで3つの手がかりを組み合わせてマスクを作る：
+      ① 明るく彩度の低い「白い皿」判定（従来通り）
+      ② 選択範囲の縁の色をサンプリングし、それに近い色も「皿」とみなす（木の皿対応）
+      ③ 肌色（YCrCb）を検出し、手・指を確実に除外する
     """
     arr = np.asarray(image.convert("RGB"))
     h, w = arr.shape[:2]
     x0, y0, x1, y1 = roi_box
     x0, y0 = max(0, min(x0, w - 2)), max(0, min(y0, h - 2))
     x1, y1 = max(x0 + 1, min(x1, w - 1)), max(y0 + 1, min(y1, h - 1))
-    rect = (x0, y0, x1 - x0, y1 - y0)
 
-    mask = np.zeros((h, w), np.uint8)
+    # ① 白い皿判定
+    hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
+    sat = hsv[:, :, 1].astype(np.float32) / 255.0
+    val = hsv[:, :, 2].astype(np.float32) / 255.0
+    whiteish = (val > 0.6) & (sat < 0.25)
+
+    # ② 縁の色（皿の色）に近い色も「皿」とみなす
+    border_color = _sample_border_color(arr, x0, y0, x1, y1)
+    color_dist = np.linalg.norm(arr.astype(np.float32) - border_color, axis=2)
+    plate_colorish = color_dist < 30
+
+    # ③ 肌色（手・指）を検出
+    skin = _skin_mask(arr)
+
+    plate_like = (whiteish | plate_colorish) & (~skin)
+
+    mask = np.full((h, w), cv2.GC_BGD, np.uint8)           # 枠の外＝確実な背景
+    mask[y0:y1, x0:x1] = cv2.GC_PR_FGD                      # 枠の中＝たぶん料理
+
+    box_exclude = np.zeros((h, w), dtype=bool)
+    box_exclude[y0:y1, x0:x1] = plate_like[y0:y1, x0:x1]
+    mask[box_exclude] = cv2.GC_PR_BGD                       # 皿らしい色＝たぶん背景
+
+    # 肌色は「確実な背景」まで強く倒す（手が料理として残るのを防ぐ）
+    box_skin = np.zeros((h, w), dtype=bool)
+    box_skin[y0:y1, x0:x1] = skin[y0:y1, x0:x1]
+    mask[box_skin] = cv2.GC_BGD
+
+    cx0, cy0 = (x0 + x1) // 2, (y0 + y1) // 2
+    core_w = max(2, int((x1 - x0) * 0.15))
+    core_h = max(2, int((y1 - y0) * 0.15))
+    mask[max(y0, cy0 - core_h):min(y1, cy0 + core_h),
+         max(x0, cx0 - core_w):min(x1, cx0 + core_w)] = cv2.GC_FGD  # 中心＝確実に料理
+
     bgd_model = np.zeros((1, 65), np.float64)
     fgd_model = np.zeros((1, 65), np.float64)
 
     try:
-        cv2.grabCut(arr, mask, rect, bgd_model, fgd_model, iterations, cv2.GC_INIT_WITH_RECT)
+        cv2.grabCut(arr, mask, None, bgd_model, fgd_model, iterations, cv2.GC_INIT_WITH_MASK)
     except Exception:
         # 極端に小さい範囲などでGrabCutが失敗した場合は、矩形そのものをマスクにする
         mask_fallback = np.zeros((h, w), np.float32)
@@ -1720,13 +1776,19 @@ with tab_photo:
 
         with col_preview:
             if custom_preview is not None:
-                st.image(custom_preview, caption=f"🎚️ プレビュー（{color_target}の色味・まだ保存されていません）", use_container_width=True)
+                display_img = custom_preview
+                display_caption = f"🎚️ プレビュー（{color_target}の色味・まだ保存されていません）"
+            else:
+                display_img = work_img
+                display_caption = "現在の写真"
+
+            st.image(display_img, caption=display_caption, use_container_width=True)
+
+            if custom_preview is not None:
                 if st.button("✅ このプレビューを保存する", key="apply_custom_top", use_container_width=True):
                     st.session_state["_work_image"] = custom_preview
                     st.rerun()
-                st.divider()
 
-            st.image(work_img, caption="現在の写真（ここまでの加工がすべて反映されています）", use_container_width=True)
             reset_col, dl_col = st.columns(2)
             with reset_col:
                 if st.button("↩️ 最初の状態に戻す", use_container_width=True):
