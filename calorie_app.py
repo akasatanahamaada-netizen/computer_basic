@@ -31,6 +31,14 @@ except Exception as _cropper_err:
     CROPPER_AVAILABLE = False
     _cropper_import_error = str(_cropper_err)
 
+# streamlit-drawable-canvas（塗って範囲を教えるUI）も同様に安全に読み込む
+try:
+    from streamlit_drawable_canvas import st_canvas
+    CANVAS_AVAILABLE = True
+except Exception as _canvas_err:
+    CANVAS_AVAILABLE = False
+    _canvas_import_error = str(_canvas_err)
+
 # ================================================================
 # ページ設定
 # ================================================================
@@ -855,6 +863,32 @@ def detect_food_mask_grabcut(image, roi_box, iterations=8):
 
     food_mask = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 1.0, 0.0).astype(np.float32)
     return food_mask
+
+def detect_food_mask_from_scribbles(image, food_scribble_mask, bg_scribble_mask, iterations=8):
+    """
+    ユーザーが「料理（緑）」「皿・背景（赤）」を塗ったスクリブルから、
+    GrabCutで料理の輪郭を精密に抽出する。四角い枠を選ぶ方式より、
+    ユーザーが直接ヒントを与えられる分、精度が安定しやすい。
+
+    food_scribble_mask, bg_scribble_mask: 画像と同じ大きさのbool配列（numpy）
+    """
+    arr = np.asarray(image.convert("RGB"))
+    h, w = arr.shape[:2]
+
+    # 何も塗られていない部分は「たぶん背景寄り」を初期値にしておく
+    # （ユーザーは料理の一部だけを塗れば良く、全体を塗る必要はない）
+    mask = np.full((h, w), cv2.GC_PR_BGD, np.uint8)
+    mask[bg_scribble_mask] = cv2.GC_BGD    # 赤で塗った＝確実な背景（皿・手など）
+    mask[food_scribble_mask] = cv2.GC_FGD  # 緑で塗った＝確実な料理
+
+    bgd_model = np.zeros((1, 65), np.float64)
+    fgd_model = np.zeros((1, 65), np.float64)
+    try:
+        cv2.grabCut(arr, mask, None, bgd_model, fgd_model, iterations, cv2.GC_INIT_WITH_MASK)
+    except Exception:
+        return food_scribble_mask.astype(np.float32)
+
+    return np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 1.0, 0.0).astype(np.float32)
 
 def enhance_food_in_selection(image, roi_box, brightness=8, contrast=12, warmth=18, saturation=32, shadows=8):
     """ユーザーが選んだ範囲からGrabCutで料理の輪郭を検出し、その部分だけ美味しそうな色味に補正する"""
@@ -1806,39 +1840,87 @@ with tab_photo:
 
         with col_controls:
             # ==== STEP1：範囲を選んでお皿（料理）を検出 ====
-            st.markdown("**STEP1　🎯 お皿の範囲を選ぶ**")
-            st.caption("枠をドラッグして料理を囲むと、その中からGrabCutで輪郭を検出します")
+            st.markdown("**STEP1　🎯 料理の場所を教える**")
 
-            if CROPPER_AVAILABLE:
-                roi_box_raw = st_cropper(
-                    work_img, realtime_update=True, box_color="#FF6B6B",
-                    aspect_ratio=None, return_type="box", key="food_cropper",
-                    should_resize_image=True,
+            selection_method = st.radio(
+                "選び方",
+                ["🖌️ 塗って選ぶ（おすすめ）", "⬜ 四角い枠で選ぶ"],
+                key="roi_method", horizontal=True,
+            ) if CANVAS_AVAILABLE else "⬜ 四角い枠で選ぶ"
+
+            if selection_method == "🖌️ 塗って選ぶ（おすすめ）" and CANVAS_AVAILABLE:
+                st.caption("🟢 料理の上を軽くなぞり、🔴 皿や手の上を軽くなぞってから確定してください")
+                pen_mode = st.radio("ペンの色", ["🟢 料理", "🔴 皿・背景（手など）"], horizontal=True, key="scribble_pen")
+                stroke_color = "#00CC00" if pen_mode == "🟢 料理" else "#FF3333"
+
+                canvas_w = min(work_img.width, 620)
+                canvas_scale = canvas_w / work_img.width
+                canvas_h = int(work_img.height * canvas_scale)
+                bg_for_canvas = work_img.resize((canvas_w, canvas_h))
+
+                canvas_result = st_canvas(
+                    fill_color="rgba(0,0,0,0)",
+                    stroke_width=14,
+                    stroke_color=stroke_color,
+                    background_image=bg_for_canvas,
+                    update_streamlit=True,
+                    height=canvas_h, width=canvas_w,
+                    drawing_mode="freedraw",
+                    key="food_canvas",
                 )
-                roi_box = (
-                    int(roi_box_raw["left"]), int(roi_box_raw["top"]),
-                    int(roi_box_raw["left"] + roi_box_raw["width"]),
-                    int(roi_box_raw["top"] + roi_box_raw["height"]),
-                )
+
+                if st.button("✅ 塗った範囲から料理を検出する", key="confirm_scribble", use_container_width=True):
+                    img_data = canvas_result.image_data if canvas_result is not None else None
+                    if img_data is None:
+                        st.warning("まだ何も塗られていません")
+                    else:
+                        r, g, b, a = img_data[:, :, 0], img_data[:, :, 1], img_data[:, :, 2], img_data[:, :, 3]
+                        green_small = (a > 0) & (g > 120) & (r < 120) & (b < 120)
+                        red_small = (a > 0) & (r > 120) & (g < 120) & (b < 120)
+
+                        if not green_small.any() or not red_small.any():
+                            st.warning("🟢 料理と 🔴 皿・背景の両方を、少しずつ塗ってから実行してください")
+                        else:
+                            iw, ih = work_img.size
+                            green_full = cv2.resize(green_small.astype(np.uint8), (iw, ih), interpolation=cv2.INTER_NEAREST).astype(bool)
+                            red_full = cv2.resize(red_small.astype(np.uint8), (iw, ih), interpolation=cv2.INTER_NEAREST).astype(bool)
+                            with st.spinner("🔍 GrabCutで料理の輪郭を検出しています..."):
+                                detected_mask = detect_food_mask_from_scribbles(work_img, green_full, red_full)
+                            st.session_state["_confirmed_food_mask"] = detected_mask
+                            st.toast(f"料理を検出しました（画像全体の約{float(detected_mask.mean())*100:.0f}%）", icon="✅")
+                            st.rerun()
             else:
-                st.warning("⚠️ ドラッグ選択ライブラリが読み込めなかったため、スライダーで範囲を選んでください")
-                iw, ih = work_img.size
-                x_range = st.slider("横方向の範囲", 0, iw, (int(iw * 0.1), int(iw * 0.9)), key="roi_x")
-                y_range = st.slider("縦方向の範囲", 0, ih, (int(ih * 0.4), int(ih * 0.95)), key="roi_y")
-                roi_box = (x_range[0], y_range[0], x_range[1], y_range[1])
-                st.image(draw_selection_box(work_img, roi_box), caption="選択中の範囲", use_container_width=True)
+                st.caption("枠をドラッグして料理を囲むと、その中からGrabCutで輪郭を検出します")
+                if CROPPER_AVAILABLE:
+                    roi_box_raw = st_cropper(
+                        work_img, realtime_update=True, box_color="#FF6B6B",
+                        aspect_ratio=None, return_type="box", key="food_cropper",
+                        should_resize_image=True,
+                    )
+                    roi_box = (
+                        int(roi_box_raw["left"]), int(roi_box_raw["top"]),
+                        int(roi_box_raw["left"] + roi_box_raw["width"]),
+                        int(roi_box_raw["top"] + roi_box_raw["height"]),
+                    )
+                else:
+                    st.warning("⚠️ ドラッグ選択ライブラリが読み込めなかったため、スライダーで範囲を選んでください")
+                    iw, ih = work_img.size
+                    x_range = st.slider("横方向の範囲", 0, iw, (int(iw * 0.1), int(iw * 0.9)), key="roi_x")
+                    y_range = st.slider("縦方向の範囲", 0, ih, (int(ih * 0.4), int(ih * 0.95)), key="roi_y")
+                    roi_box = (x_range[0], y_range[0], x_range[1], y_range[1])
+                    st.image(draw_selection_box(work_img, roi_box), caption="選択中の範囲", use_container_width=True)
 
-            if st.button("✅ この範囲でお皿を検出する", key="confirm_roi", use_container_width=True):
-                with st.spinner("🔍 GrabCutで料理の輪郭を検出しています..."):
-                    detected_mask = detect_food_mask_grabcut(work_img, roi_box)
-                st.session_state["_confirmed_food_mask"] = detected_mask
-                st.toast(f"お皿（料理）を検出しました（選択範囲内の約{float(detected_mask.mean())*100:.0f}%）", icon="✅")
-                st.rerun()
+                if st.button("✅ この範囲でお皿を検出する", key="confirm_roi", use_container_width=True):
+                    with st.spinner("🔍 GrabCutで料理の輪郭を検出しています..."):
+                        detected_mask = detect_food_mask_grabcut(work_img, roi_box)
+                    st.session_state["_confirmed_food_mask"] = detected_mask
+                    st.toast(f"お皿（料理）を検出しました（選択範囲内の約{float(detected_mask.mean())*100:.0f}%）", icon="✅")
+                    st.rerun()
 
             if mask_ready:
                 st.success("✅ お皿の範囲を検出済みです（STEP2・STEP3が使えます）")
             else:
-                st.info("👆 範囲を選んで検出すると、次のステップが使えるようになります")
+                st.info("👆 教えると、次のステップが使えるようになります")
 
             st.divider()
 
