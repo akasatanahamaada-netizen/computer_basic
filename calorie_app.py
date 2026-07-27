@@ -1637,9 +1637,28 @@ with tab_photo:
     if work_img is None:
         st.info("📸 上のアップロード欄から写真を選ぶか、「食事を記録」タブで写真を分析すると、ここで加工できます")
     else:
+        # カスタムスライダーの値は col_controls 側で作られるが、Streamlitは
+        # ウィジェットの値をキーごとに session_state に保持しているため、
+        # ここで先に読み出してプレビューを「現在の写真」の上に表示できる
+        s_brightness = st.session_state.get("s_brightness", 10)
+        s_contrast = st.session_state.get("s_contrast", -5)
+        s_warmth = st.session_state.get("s_warmth", 10)
+        s_saturation = st.session_state.get("s_saturation", -10)
+        s_shadows = st.session_state.get("s_shadows", 5)
+        custom_preview = apply_insta_adjustments(
+            work_img, brightness=s_brightness, contrast=s_contrast,
+            warmth=s_warmth, saturation=s_saturation, shadows=s_shadows,
+        )
+
         col_preview, col_controls = st.columns([1, 1], gap="medium")
 
         with col_preview:
+            st.image(custom_preview, caption="🎚️ プレビュー（スライダーの値を反映・まだ保存されていません）", use_container_width=True)
+            if st.button("✅ このプレビューを保存する", key="apply_custom_top", use_container_width=True):
+                st.session_state["_work_image"] = custom_preview
+                st.rerun()
+
+            st.divider()
             st.image(work_img, caption="現在の写真（ここまでの加工がすべて反映されています）", use_container_width=True)
             reset_col, dl_col = st.columns(2)
             with reset_col:
@@ -1671,17 +1690,12 @@ with tab_photo:
                             st.session_state["_work_image"] = generate_instagram_photo(work_img, style_key)
                             st.rerun()
 
-                st.markdown("**カスタム調整**（動かすと下にプレビューが出ます）")
-                s_brightness = st.slider("明るさ", -100, 100, 10, key="s_brightness")
-                s_contrast = st.slider("コントラスト", -100, 100, -5, key="s_contrast")
-                s_warmth = st.slider("暖かさ", -100, 100, 10, key="s_warmth")
-                s_saturation = st.slider("彩度", -100, 100, -10, key="s_saturation")
-                s_shadows = st.slider("シャドウ", -100, 100, 5, key="s_shadows")
-                custom_preview = apply_insta_adjustments(
-                    work_img, brightness=s_brightness, contrast=s_contrast,
-                    warmth=s_warmth, saturation=s_saturation, shadows=s_shadows,
-                )
-                st.image(custom_preview, caption="プレビュー（まだ保存されていません）", use_container_width=True)
+                st.markdown("**カスタム調整**（動かすと左上のプレビューが即座に変わります）")
+                st.slider("明るさ", -100, 100, 10, key="s_brightness")
+                st.slider("コントラスト", -100, 100, -5, key="s_contrast")
+                st.slider("暖かさ", -100, 100, 10, key="s_warmth")
+                st.slider("彩度", -100, 100, -10, key="s_saturation")
+                st.slider("シャドウ", -100, 100, 5, key="s_shadows")
                 if st.button("✅ この色味で保存する", key="apply_custom", use_container_width=True):
                     st.session_state["_work_image"] = custom_preview
                     st.rerun()
