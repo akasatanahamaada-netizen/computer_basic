@@ -1882,23 +1882,36 @@ with tab_photo:
     )
 
     # ---- 新しい写真が来たかどうかを判定し、来ていれば作業状態を初期化する ----
-    # ※ id()はガベージコレクション後にオブジェクトのIDが偶然再利用されることがあり、
-    #   「新しい写真なのに同じ写真だと誤判定される」バグの原因になるため使わない。
-    #   代わりにアップロードのたびに発行するユニークなトークンで比較する。
-    new_source_img, new_source_id = None, None
-    if edit_upload is not None:
-        new_source_img = Image.open(edit_upload).convert("RGB")
-        new_source_id = ("upload", edit_upload.getvalue())
-    elif st.session_state.get("_last_uploaded_image") is not None:
-        candidate = st.session_state["_last_uploaded_image"]
-        new_source_img = candidate
-        new_source_id = ("meal_tab", st.session_state.get("_last_uploaded_image_token"))
+    # ※ 以前は「アップロード欄に何か入っていたら、食事タブ側の更新は無視する」
+    #   という作りだったため、一度でもこのタブでアップロードすると、それ以降
+    #   食事タブで新しい写真を分析しても反映されなくなるバグがあった。
+    #   2つの経路（このタブでのアップロード／食事タブでの分析）を、
+    #   それぞれ独立して「前回と違うか」をチェックする方式に変更する。
+    new_source_img = None
 
-    if new_source_img is not None and st.session_state.get("_photo_source_id") != new_source_id:
+    if edit_upload is not None:
+        cur_upload_bytes = edit_upload.getvalue()
+        if cur_upload_bytes != st.session_state.get("_seen_upload_bytes"):
+            new_source_img = Image.open(edit_upload).convert("RGB")
+            st.session_state["_seen_upload_bytes"] = cur_upload_bytes
+
+    if new_source_img is None and st.session_state.get("_last_uploaded_image") is not None:
+        cur_meal_token = st.session_state.get("_last_uploaded_image_token")
+        if cur_meal_token != st.session_state.get("_seen_meal_token"):
+            new_source_img = st.session_state["_last_uploaded_image"]
+            st.session_state["_seen_meal_token"] = cur_meal_token
+
+    if new_source_img is not None:
         st.session_state["_original_image"] = new_source_img
         st.session_state["_work_image"] = new_source_img.copy()
-        st.session_state["_photo_source_id"] = new_source_id
         st.session_state["_confirmed_food_mask"] = None  # 新しい写真では選択をやり直す
+        # 古い写真に対して設定していたスライダー・ラジオ等もリセットする
+        for _k in ["s_brightness", "s_contrast", "s_warmth", "s_saturation", "s_shadows",
+                   "color_target", "mosaic_target", "mosaic_grain"]:
+            st.session_state.pop(_k, None)
+        # cropperコンポーネントのキーを変えて、フロント側の内部状態も
+        # 確実に作り直す（古い写真のクロップ位置が残らないようにする）
+        st.session_state["_photo_version"] = st.session_state.get("_photo_version", 0) + 1
 
     work_img = st.session_state.get("_work_image")
 
@@ -1975,7 +1988,8 @@ with tab_photo:
 
                 roi_box_raw = st_cropper(
                     cropper_display_img, realtime_update=True, box_color="#FF6B6B",
-                    aspect_ratio=None, return_type="box", key="food_cropper",
+                    aspect_ratio=None, return_type="box",
+                    key=f"food_cropper_{st.session_state.get('_photo_version', 0)}",
                     should_resize_image=False,
                 )
                 roi_box = (
