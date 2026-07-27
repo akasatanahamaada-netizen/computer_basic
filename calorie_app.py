@@ -23,6 +23,14 @@ except Exception as _cv2_err:
     CV2_AVAILABLE = False
     _cv2_import_error = str(_cv2_err)
 
+# streamlit-cropper（ドラッグで範囲選択するUI）も同様に安全に読み込む
+try:
+    from streamlit_cropper import st_cropper
+    CROPPER_AVAILABLE = True
+except Exception as _cropper_err:
+    CROPPER_AVAILABLE = False
+    _cropper_import_error = str(_cropper_err)
+
 # ================================================================
 # ページ設定
 # ================================================================
@@ -1170,8 +1178,8 @@ if not st.session_state.user_id:
     st.info("👈 左のサイドバーで「ニックネーム」を入力すると、あなた専用の記録が始まります！")
     st.stop()
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🍽️ 食事を記録", "🏃 運動を記録", "📊 今日のまとめ", "📈 履歴グラフ", "🎨 写真を加工",
+tab1, tab_photo, tab2, tab3, tab4 = st.tabs([
+    "🍽️ 食事を記録", "🎨 写真を加工", "🏃 運動を記録", "📊 今日のまとめ", "📈 履歴グラフ",
 ])
 
 # ================================================================
@@ -1599,148 +1607,154 @@ with tab4:
         st.rerun()
 
 # ================================================================
-# タブ5：写真を加工（フィルター・お皿検出・顔モザイクなど）
+# タブ：写真を加工（フィルター・お皿検出・顔モザイクなど／重ね掛け可能）
 # ================================================================
-with tab5:
+with tab_photo:
     st.subheader("🎨 写真を加工する")
     st.caption("AIは使わず、画像処理・古典的なCVアルゴリズムをすべて自分のコードで実装しています（トークンは消費しません）")
 
     edit_upload = st.file_uploader(
         "加工したい写真を選ぶ", type=["jpg", "jpeg", "png", "webp"], key="edit_tab_uploader"
     )
+
+    # ---- 新しい写真が来たかどうかを判定し、来ていれば作業状態を初期化する ----
+    new_source_img, new_source_id = None, None
     if edit_upload is not None:
-        # アップロードした瞬間、選び直すまで同じ画像を使い回す
-        new_bytes = edit_upload.getvalue()
-        if st.session_state.get("_edit_upload_bytes") != new_bytes:
-            st.session_state["_last_uploaded_image"] = Image.open(edit_upload).convert("RGB")
-            st.session_state["_edit_upload_bytes"] = new_bytes
+        new_source_img = Image.open(edit_upload).convert("RGB")
+        new_source_id = ("upload", edit_upload.getvalue())
+    elif st.session_state.get("_last_uploaded_image") is not None:
+        candidate = st.session_state["_last_uploaded_image"]
+        new_source_img = candidate
+        new_source_id = ("meal_tab", id(candidate))
 
-    src_img = st.session_state.get("_last_uploaded_image")
+    if new_source_img is not None and st.session_state.get("_photo_source_id") != new_source_id:
+        st.session_state["_original_image"] = new_source_img
+        st.session_state["_work_image"] = new_source_img.copy()
+        st.session_state["_photo_source_id"] = new_source_id
 
-    if src_img is None:
+    work_img = st.session_state.get("_work_image")
+
+    if work_img is None:
         st.info("📸 上のアップロード欄から写真を選ぶか、「食事を記録」タブで写真を分析すると、ここで加工できます")
     else:
-        # ---- 左：プレビュー／右：操作パネル を横並びにして1画面に収める ----
         col_preview, col_controls = st.columns([1, 1], gap="medium")
 
+        with col_preview:
+            st.image(work_img, caption="現在の写真（ここまでの加工がすべて反映されています）", use_container_width=True)
+            reset_col, dl_col = st.columns(2)
+            with reset_col:
+                if st.button("↩️ 最初の状態に戻す", use_container_width=True):
+                    st.session_state["_work_image"] = st.session_state["_original_image"].copy()
+                    st.rerun()
+            with dl_col:
+                buf = io.BytesIO()
+                work_img.convert("RGB").save(buf, format="JPEG", quality=92)
+                st.download_button(
+                    "⬇️ ダウンロード", data=buf.getvalue(),
+                    file_name="mogureco_edited.jpg", mime="image/jpeg",
+                    use_container_width=True,
+                )
+
         with col_controls:
-            mode = st.radio(
-                "加工モード",
-                ["元の写真", "🎯 範囲を選んで料理を補正", "🍽️ 料理だけ美味しそうに",
-                 "🍂 低彩度・暖色寄り", "🌿 自然な彩度高め", "🔥 青み削り",
-                 "🎚️ カスタム調整", "🍽️ お皿検出モザイク", "🙈 顔モザイク",
-                 "🍽️👤 料理と人、それぞれに合う色味"],
-                key="edit_mode",
-            )
+            # ---- ① 色味フィルター：押す・保存するたびに「現在の写真」を上書きする ----
+            with st.expander("🎨 色味フィルター", expanded=True):
+                st.caption("プリセットは押した瞬間に、現在の写真の上に重ねて保存されます")
+                preset_cols = st.columns(3)
+                preset_map = {
+                    "muted_warm": "🍂 低彩度暖色",
+                    "natural_vivid": "🌿 彩度高め",
+                    "reduce_blue": "🔥 青み削り",
+                }
+                for i, (style_key, label) in enumerate(preset_map.items()):
+                    with preset_cols[i]:
+                        if st.button(label, key=f"preset_{style_key}", use_container_width=True):
+                            st.session_state["_work_image"] = generate_instagram_photo(work_img, style_key)
+                            st.rerun()
 
-            if mode == "🎯 範囲を選んで料理を補正":
-                st.caption("スライダーで料理を囲む大まかな範囲を選ぶと、そこからAIなしで輪郭を自動検出します")
-                iw, ih = src_img.size
-                x_range = st.slider("横方向の範囲", 0, iw, (int(iw * 0.1), int(iw * 0.9)), key="roi_x")
-                y_range = st.slider("縦方向の範囲", 0, ih, (int(ih * 0.4), int(ih * 0.95)), key="roi_y")
-
-            if mode == "🎚️ カスタム調整":
-                st.caption("インスタの編集機能と同じ-100〜100のスライダーです。動かすと右のプレビューが即座に変わります")
+                st.markdown("**カスタム調整**（動かすと下にプレビューが出ます）")
                 s_brightness = st.slider("明るさ", -100, 100, 10, key="s_brightness")
                 s_contrast = st.slider("コントラスト", -100, 100, -5, key="s_contrast")
                 s_warmth = st.slider("暖かさ", -100, 100, 10, key="s_warmth")
                 s_saturation = st.slider("彩度", -100, 100, -10, key="s_saturation")
                 s_shadows = st.slider("シャドウ", -100, 100, 5, key="s_shadows")
+                custom_preview = apply_insta_adjustments(
+                    work_img, brightness=s_brightness, contrast=s_contrast,
+                    warmth=s_warmth, saturation=s_saturation, shadows=s_shadows,
+                )
+                st.image(custom_preview, caption="プレビュー（まだ保存されていません）", use_container_width=True)
+                if st.button("✅ この色味で保存する", key="apply_custom", use_container_width=True):
+                    st.session_state["_work_image"] = custom_preview
+                    st.rerun()
 
-            if mode in ("🍽️ お皿検出モザイク", "🙈 顔モザイク"):
-                if not CV2_AVAILABLE or _FACE_CASCADE is None:
-                    st.warning(
-                        "⚠️ この環境では画像検出ライブラリ（OpenCV）を読み込めなかったため、"
-                        "この機能は現在使用できません。"
+            # ---- ② ドラッグで範囲を選んで、料理だけをGrabCutで検出・補正 ----
+            with st.expander("🎯 範囲を選んで料理を補正", expanded=False):
+                if CROPPER_AVAILABLE:
+                    st.caption("枠の四隅をドラッグして、料理を囲んでください")
+                    _, roi_box_raw = st_cropper(
+                        work_img, realtime_update=True, box_color="#FF6B6B",
+                        aspect_ratio=None, return_type="both", key="food_cropper",
                     )
+                    roi_box = (
+                        int(roi_box_raw["left"]), int(roi_box_raw["top"]),
+                        int(roi_box_raw["left"] + roi_box_raw["width"]),
+                        int(roi_box_raw["top"] + roi_box_raw["height"]),
+                    )
+                else:
+                    st.warning("⚠️ ドラッグ選択ライブラリが読み込めなかったため、スライダーで範囲を選んでください")
+                    iw, ih = work_img.size
+                    x_range = st.slider("横方向の範囲", 0, iw, (int(iw * 0.1), int(iw * 0.9)), key="roi_x")
+                    y_range = st.slider("縦方向の範囲", 0, ih, (int(ih * 0.4), int(ih * 0.95)), key="roi_y")
+                    roi_box = (x_range[0], y_range[0], x_range[1], y_range[1])
+                    st.image(draw_selection_box(work_img, roi_box), caption="選択中の範囲", use_container_width=True)
+
+                if st.button("✅ この範囲から料理を検出して保存", key="apply_roi", use_container_width=True):
+                    with st.spinner("🔍 GrabCutで料理の輪郭を検出しています..."):
+                        result_img, coverage = enhance_food_in_selection(work_img, roi_box)
+                    st.session_state["_work_image"] = result_img
+                    st.toast(f"料理らしき部分（範囲内の約{coverage*100:.0f}%）を補正しました", icon="✅")
+                    st.rerun()
+
+            # ---- ③ 自動検出（お皿／顔）でまとめて色味補正 ----
+            with st.expander("🍽️ 自動検出でまとめて補正", expanded=False):
+                if not CV2_AVAILABLE:
+                    st.warning("⚠️ この環境では画像検出ライブラリ（OpenCV）を読み込めなかったため使用できません")
+                else:
+                    auto_cols = st.columns(2)
+                    with auto_cols[0]:
+                        if st.button("🍽️ 料理だけ美味しそうに", key="apply_food_only", use_container_width=True):
+                            with st.spinner("🔍 お皿を検出中..."):
+                                result_img, detected = enhance_food_only(work_img)
+                            st.session_state["_work_image"] = result_img
+                            st.rerun()
+                    with auto_cols[1]:
+                        if st.button("🍽️👤 料理と人で色味を変える", key="apply_food_portrait", use_container_width=True):
+                            with st.spinner("🔍 お皿と顔を検出中..."):
+                                result_img, n_faces = region_aware_food_portrait_enhance(work_img)
+                            st.session_state["_work_image"] = result_img
+                            st.rerun()
+
+            # ---- ④ モザイク処理（保存済みの写真の上にさらに重ねて適用できる） ----
+            with st.expander("🧩 モザイク処理", expanded=False):
+                if not CV2_AVAILABLE or _FACE_CASCADE is None:
+                    st.warning("⚠️ この環境では画像検出ライブラリ（OpenCV）を読み込めなかったため使用できません")
                 else:
                     mosaic_grain = st.radio(
                         "モザイクの粗さ", ["🔲 荒め", "🔳 細かめ"],
                         horizontal=True, key="mosaic_grain",
                     )
-
-        # ---- プレビューを常に自動計算（ボタン不要・選択/スライダー変更で即反映） ----
-        detect_note = None
-        is_coarse = st.session_state.get("mosaic_grain", "🔲 荒め") == "🔲 荒め"
-
-        if mode == "元の写真":
-            edited = src_img
-        elif mode == "🎯 範囲を選んで料理を補正":
-            roi_box = (
-                st.session_state.get("roi_x", (0, src_img.width))[0],
-                st.session_state.get("roi_y", (0, src_img.height))[0],
-                st.session_state.get("roi_x", (0, src_img.width))[1],
-                st.session_state.get("roi_y", (0, src_img.height))[1],
-            )
-            with col_preview:
-                st.image(
-                    draw_selection_box(src_img, roi_box),
-                    caption="選択中の範囲（赤い枠）",
-                    use_container_width=True,
-                )
-            with st.spinner("🔍 GrabCutで料理の輪郭を検出しています..."):
-                edited, coverage = enhance_food_in_selection(src_img, roi_box)
-            detect_note = f"✅ 選んだ範囲の中から、料理らしき部分（面積の約{coverage*100:.0f}%）を検出して補正しました"
-        elif mode == "🍽️ 料理だけ美味しそうに":
-            with col_preview:
-                with st.spinner("🔍 お皿を検出して、料理だけ色味を補正しています..."):
-                    edited, plate_detected = enhance_food_only(src_img)
-            detect_note = "✅ お皿を検出し、料理部分だけ食欲をそそる発色に補正しました" if plate_detected else "⚠️ お皿を検出できず、画面下側を目安に補正しました"
-        elif mode == "🎚️ カスタム調整":
-            edited = apply_insta_adjustments(
-                src_img,
-                brightness=st.session_state.get("s_brightness", 10),
-                contrast=st.session_state.get("s_contrast", -5),
-                warmth=st.session_state.get("s_warmth", 10),
-                saturation=st.session_state.get("s_saturation", -10),
-                shadows=st.session_state.get("s_shadows", 5),
-            )
-        elif mode == "🍽️ お皿検出モザイク":
-            if not CV2_AVAILABLE or _FACE_CASCADE is None:
-                edited = src_img
-            else:
-                plate_block = 26 if is_coarse else 10
-                with col_preview:
-                    with st.spinner("🔍 Hough変換でお皿の形（円）を検出中..."):
-                        edited, plate_detected = mosaic_background_outside_plate(src_img, block=plate_block)
-                detect_note = "✅ 円形のお皿を検出しました" if plate_detected else "⚠️ お皿の形を検出できず、中央を基準にモザイク化しました"
-        elif mode == "🙈 顔モザイク":
-            if not CV2_AVAILABLE or _FACE_CASCADE is None:
-                edited = src_img
-            else:
-                face_divisor = 4 if is_coarse else 14
-                with col_preview:
-                    with st.spinner("🔍 Haar Cascadeで顔を検出中..."):
-                        edited, n_faces = mosaic_faces(src_img, block_divisor=face_divisor)
-                detect_note = f"✅ {n_faces}件の顔を検出してモザイク化しました" if n_faces > 0 else "人の顔は検出されませんでした（そのままの写真です）"
-        elif mode == "🍽️👤 料理と人、それぞれに合う色味":
-            with col_preview:
-                with st.spinner("🔍 お皿と顔を検出して、領域ごとに色味を変えています..."):
-                    edited, n_faces = region_aware_food_portrait_enhance(src_img)
-            detect_note = (
-                f"✅ 料理は食欲をそそる発色に、人物（{n_faces}件検出）の肌は自然な色味に分けて加工しました"
-                if n_faces > 0 else
-                "✅ 料理部分は食欲をそそる発色に加工しました（顔は検出されませんでした）"
-            )
-        else:
-            style_key_map = {
-                "🍂 低彩度・暖色寄り": "muted_warm",
-                "🌿 自然な彩度高め": "natural_vivid",
-                "🔥 青み削り": "reduce_blue",
-            }
-            edited = generate_instagram_photo(src_img, style_key_map[mode])
-
-        with col_preview:
-            st.image(edited, caption=f"プレビュー（{mode}）", use_container_width=True)
-            if detect_note:
-                st.caption(detect_note)
-
-            buf = io.BytesIO()
-            edited.convert("RGB").save(buf, format="JPEG", quality=92)
-            st.download_button(
-                "⬇️ この写真をダウンロード",
-                data=buf.getvalue(),
-                file_name="mogureco_edited.jpg",
-                mime="image/jpeg",
-                use_container_width=True,
-            )
+                    is_coarse = mosaic_grain == "🔲 荒め"
+                    mos_cols = st.columns(2)
+                    with mos_cols[0]:
+                        if st.button("🍽️ お皿の外側だけモザイク", key="apply_plate_mosaic", use_container_width=True):
+                            plate_block = 26 if is_coarse else 10
+                            with st.spinner("🔍 Hough変換でお皿を検出中..."):
+                                result_img, detected = mosaic_background_outside_plate(work_img, block=plate_block)
+                            st.session_state["_work_image"] = result_img
+                            st.rerun()
+                    with mos_cols[1]:
+                        if st.button("🙈 顔だけモザイク", key="apply_face_mosaic", use_container_width=True):
+                            face_divisor = 4 if is_coarse else 14
+                            with st.spinner("🔍 Haar Cascadeで顔を検出中..."):
+                                result_img, n_faces = mosaic_faces(work_img, block_divisor=face_divisor)
+                            st.session_state["_work_image"] = result_img
+                            st.rerun()
