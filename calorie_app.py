@@ -1060,68 +1060,6 @@ def region_aware_food_portrait_enhance(image):
            + portrait_arr * face_mask[..., None])
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)), n_faces
 
-# ================================================================
-# 【AI補助】Geminiに「お皿ではなく料理の領域」をセグメンテーションしてもらう
-# ----------------------------------------------------------------
-# 矩形（だいたいの場所）だけでなく、Geminiのセグメンテーション機能を使って
-# 「料理の形そのもの」を直接教えてもらう。GrabCutより直接的で精密になる。
-# トークン消費を抑えるため、①画像を小さく縮小してから送る②対象は
-# 料理1つだけに絞る③自動実行はせず、ボタンを押した時だけ1回呼び出す。
-# ================================================================
-
-def suggest_food_mask_with_gemini(image, max_dim=384):
-    """
-    Geminiのセグメンテーション機能で、料理そのものの精密なマスクを取得する。
-
-    Geminiは物体検出・セグメンテーションを独自の形式で学習済みのため、それに合わせる：
-      ・"box_2d"：[y_min, x_min, y_max, x_max]、0〜1000に正規化
-      ・"mask"：矩形内だけを表す、base64エンコードされたPNG（0〜255の確率マップ）
-    マスクは矩形のサイズにリサイズしてから、127を閾値に二値化して使う。
-
-    戻り値: (mask, roi_box)
-      mask: 元画像と同じ大きさの0/1マスク（numpy配列）
-      roi_box: Geminiが示した矩形 (x0, y0, x1, y1)（元画像のピクセル座標）
-    """
-    small = image.convert("RGB").copy()
-    small.thumbnail((max_dim, max_dim))  # トークン節約：送る画像を小さくする
-
-    prompt = (
-        "Give the segmentation mask for the food (not the plate, bowl, cup, or table) "
-        "in this image. If there are multiple food items, include all of them as one "
-        "combined region. Output a JSON list with exactly one item containing: "
-        "\"box_2d\" as [y_min, x_min, y_max, x_max] normalized to 0-1000, "
-        "\"mask\" as the base64-encoded PNG probability map, and \"label\". "
-        "JSON only, no explanation."
-    )
-    model = genai.GenerativeModel("models/gemini-2.5-flash-lite")
-    response = model.generate_content([prompt, small])
-    text = response.text.strip()
-    text = re.sub(r'^```json|```$', '', text, flags=re.MULTILINE).strip()
-    data_list = json.loads(text)
-    if not data_list:
-        raise ValueError("料理を検出できませんでした")
-    item = data_list[0]
-
-    y_min, x_min, y_max, x_max = item["box_2d"]
-    w, h = image.size
-    x0 = int(max(0, min(1000, x_min)) / 1000 * w)
-    y0 = int(max(0, min(1000, y_min)) / 1000 * h)
-    x1 = int(max(0, min(1000, x_max)) / 1000 * w)
-    y1 = int(max(0, min(1000, y_max)) / 1000 * h)
-    if x1 <= x0: x1 = min(w, x0 + 10)
-    if y1 <= y0: y1 = min(h, y0 + 10)
-
-    mask_b64 = item["mask"]
-    if mask_b64.startswith("data:"):
-        mask_b64 = mask_b64.split(",", 1)[1]
-    mask_bytes = base64.b64decode(mask_b64)
-    mask_img = Image.open(io.BytesIO(mask_bytes)).convert("L")
-    mask_resized = mask_img.resize((max(1, x1 - x0), max(1, y1 - y0)))
-    mask_arr = (np.array(mask_resized) > 127).astype(np.float32)
-
-    full_mask = np.zeros((h, w), dtype=np.float32)
-    full_mask[y0:y1, x0:x1] = mask_arr
-    return full_mask, (x0, y0, x1, y1)
 
 def estimate_calories_gemini(image):
     prompt = """この写真に写っている料理をすべて認識してください。
@@ -1905,23 +1843,8 @@ with tab_photo:
                 )
 
         with col_controls:
-            # ==== STEP1：料理の領域を決める ====
-            st.markdown("**STEP1　🎯 料理の領域を決める**")
-
-            if gemini_ready:
-                if st.button("🤖 AIに料理の領域を教えてもらう（セグメンテーション・軽量呼び出し）", key="ai_suggest_mask", use_container_width=True):
-                    with st.spinner("Geminiに料理の形を確認中（縮小画像で軽く問い合わせています）..."):
-                        try:
-                            ai_mask, ai_box = suggest_food_mask_with_gemini(work_img)
-                            st.session_state["_confirmed_food_mask"] = ai_mask
-                            st.toast(f"料理の領域を検出しました（画像全体の約{float(ai_mask.mean())*100:.0f}%）", icon="✅")
-                            st.rerun()
-                        except Exception as e:
-                            st.warning(f"AIからの取得に失敗しました（{e}）。下から手動で選んでください。")
-                st.caption("💡 皿ではなく「料理そのものの形」を、縮小画像でGeminiに聞きます（通常の料理認識よりトークン消費は少なめです）")
-
-            st.divider()
-            st.caption("うまく検出できない場合は、自分で範囲を選んでGrabCutで検出することもできます")
+            # ==== STEP1：範囲を選んでお皿（料理）を検出 ====
+            st.markdown("**STEP1　🎯 お皿の範囲を選ぶ**")
             st.caption("枠をドラッグして料理を囲むと、その中からGrabCutで輪郭を検出します（木の皿・手も自動で除外を試みます）")
 
             if CROPPER_AVAILABLE:
