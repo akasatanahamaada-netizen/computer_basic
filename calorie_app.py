@@ -1993,11 +1993,30 @@ with tab_photo:
                    "color_target", "mosaic_target", "mosaic_grain"]:
             st.session_state.pop(_k, None)
         st.session_state["_photo_version"] = st.session_state.get("_photo_version", 0) + 1
-        # お皿の位置をCV検出し、フェザリング付き楕円マスクを生成する
+        # 自動でお皿（料理）の楕円マスクを生成する
+        # GrabCutは境界がカクカクになりやすいため使わず、
+        # 検出した位置から滑らかなフェザリング付き楕円マスクを直接生成する
         iw, ih = new_source_img.size
-        if CV2_AVAILABLE:
+        plate_cx, plate_cy, plate_rx, plate_ry = None, None, None, None
+
+        # ① Gemini AIで料理の位置を検出（最も正確）
+        if gemini_ready:
+            roi = detect_food_region_gemini(new_source_img)
+            if roi is not None:
+                x0, y0, x1, y1 = roi
+                plate_cx = (x0 + x1) / 2
+                plate_cy = (y0 + y1) / 2
+                plate_rx = (x1 - x0) / 2
+                plate_ry = (y1 - y0) / 2
+
+        # ② Geminiが使えない/失敗した場合はCV検出にフォールバック
+        if plate_cx is None and CV2_AVAILABLE:
             plate_cx, plate_cy, plate_rx, plate_ry, _method = detect_plate_region(new_source_img)
-            y_idx, x_idx = np.ogrid[:ih, :iw]
+
+        # 楕円マスクを生成（フェザリングで境界をなめらかにぼかす）
+        if plate_cx is not None:
+            arr_h, arr_w = ih, iw
+            y_idx, x_idx = np.ogrid[:arr_h, :arr_w]
             norm_dist = np.sqrt(((x_idx - plate_cx) / max(plate_rx, 1)) ** 2
                                 + ((y_idx - plate_cy) / max(plate_ry, 1)) ** 2)
             feather = 0.18
