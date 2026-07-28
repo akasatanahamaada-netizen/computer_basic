@@ -1993,9 +1993,8 @@ with tab_photo:
                    "color_target", "mosaic_target", "mosaic_grain"]:
             st.session_state.pop(_k, None)
         st.session_state["_photo_version"] = st.session_state.get("_photo_version", 0) + 1
-        # 自動でお皿（料理）の楕円マスクを生成する
-        # GrabCutは境界がカクカクになりやすいため使わず、
-        # 検出した位置から滑らかなフェザリング付き楕円マスクを直接生成する
+        # お皿の位置を検出し、フェザリング付き楕円マスクを生成する
+        # Gemini AI → CV検出 の優先順
         iw, ih = new_source_img.size
         plate_cx, plate_cy, plate_rx, plate_ry = None, None, None, None
 
@@ -2009,14 +2008,12 @@ with tab_photo:
                 plate_rx = (x1 - x0) / 2
                 plate_ry = (y1 - y0) / 2
 
-        # ② Geminiが使えない/失敗した場合はCV検出にフォールバック
+        # ② フォールバック：CV検出
         if plate_cx is None and CV2_AVAILABLE:
             plate_cx, plate_cy, plate_rx, plate_ry, _method = detect_plate_region(new_source_img)
 
-        # 楕円マスクを生成（フェザリングで境界をなめらかにぼかす）
         if plate_cx is not None:
-            arr_h, arr_w = ih, iw
-            y_idx, x_idx = np.ogrid[:arr_h, :arr_w]
+            y_idx, x_idx = np.ogrid[:ih, :iw]
             norm_dist = np.sqrt(((x_idx - plate_cx) / max(plate_rx, 1)) ** 2
                                 + ((y_idx - plate_cy) / max(plate_ry, 1)) ** 2)
             feather = 0.18
@@ -2044,16 +2041,17 @@ with tab_photo:
 
         # スライダーが全部0（初期状態）ならプレビュー加工しない
         has_custom = any([s_brightness, s_contrast, s_warmth, s_saturation, s_shadows])
+        original_for_preview = st.session_state["_original_image"]
 
         if has_custom and mask_ready:
             target_mask = food_mask if color_target == "🍽️ 料理" else (1.0 - food_mask)
             custom_preview = apply_adjustments_to_mask(
-                work_img, target_mask, brightness=s_brightness, contrast=s_contrast,
+                original_for_preview, target_mask, brightness=s_brightness, contrast=s_contrast,
                 warmth=s_warmth, saturation=s_saturation, shadows=s_shadows,
             )
         elif has_custom:
             custom_preview = apply_insta_adjustments(
-                work_img, brightness=s_brightness, contrast=s_contrast,
+                original_for_preview, brightness=s_brightness, contrast=s_contrast,
                 warmth=s_warmth, saturation=s_saturation, shadows=s_shadows,
             )
         else:
@@ -2108,13 +2106,14 @@ with tab_photo:
                 "natural_vivid": ("🌿 彩度高め", dict(brightness=5, contrast=10, warmth=0, saturation=28, shadows=-5)),
                 "reduce_blue": ("🔥 青み削り", dict(brightness=0, contrast=0, warmth=28, saturation=5, shadows=0)),
             }
+            original_img = st.session_state["_original_image"]
             for i, (style_key, (label, params)) in enumerate(preset_params.items()):
                 with preset_cols[i]:
                     if st.button(label, key=f"preset_{style_key}", use_container_width=True):
                         if mask_ready:
-                            st.session_state["_work_image"] = apply_adjustments_to_mask(work_img, target_mask_for_preset, **params)
+                            st.session_state["_work_image"] = apply_adjustments_to_mask(original_img, target_mask_for_preset, **params)
                         else:
-                            st.session_state["_work_image"] = apply_insta_adjustments(work_img, **params)
+                            st.session_state["_work_image"] = apply_insta_adjustments(original_img, **params)
                         st.rerun()
 
             with st.expander("🎚️ カスタム調整", expanded=False):
