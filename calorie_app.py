@@ -24,13 +24,16 @@ except Exception as _cv2_err:
     CV2_AVAILABLE = False
     _cv2_import_error = str(_cv2_err)
 
-# streamlit-cropper（ドラッグで範囲選択するUI）も同様に安全に読み込む
+
+# streamlit-drawable-canvas（自由に描いてモザイク範囲を指定するUI）
+# 過去にStreamlitの非公開APIとの相性で実行時エラーが起きたことがあるため、
+# importだけでなく実際に呼び出す箇所でもtry/exceptで保護する
 try:
-    from streamlit_cropper import st_cropper
-    CROPPER_AVAILABLE = True
-except Exception as _cropper_err:
-    CROPPER_AVAILABLE = False
-    _cropper_import_error = str(_cropper_err)
+    from streamlit_drawable_canvas import st_canvas
+    CANVAS_AVAILABLE = True
+except Exception as _canvas_err:
+    CANVAS_AVAILABLE = False
+    _canvas_import_error = str(_canvas_err)
 
 # streamlit-drawable-canvas は内部でStreamlitの非公開API（image_to_url）に依存しており、
 # Streamlit Cloud側のバージョンとの相性で実行時エラーになったため使用をやめた。
@@ -773,6 +776,14 @@ def mosaic_outside_mask(image, keep_mask, block=18):
     out = np.where(mask_bin, arr, mosaic_full)
     return Image.fromarray(out.astype(np.uint8))
 
+def mosaic_within_mask(image, draw_mask, block=16):
+    """描いた場所（draw_mask内）だけをモザイク化する"""
+    image = image.convert("RGB")
+    arr = np.array(image)
+    mosaic_full = np.array(pixelate(image, block=block))
+    mask_bin = (draw_mask > 0.5)[..., None]
+    out = np.where(mask_bin, mosaic_full, arr)
+    return Image.fromarray(out.astype(np.uint8))
 # ================================================================
 # 【自作のCV処理】料理だけを「美味しそうな色味」に補正する
 # ----------------------------------------------------------------
@@ -2108,33 +2119,112 @@ with tab_photo:
 
             st.divider()
 
-            # ==== 🧩 モザイク処理 ====
-            st.markdown("**🧩 モザイク処理**")
-            if not CV2_AVAILABLE or _FACE_CASCADE is None:
-                st.warning("⚠️ この環境では画像検出ライブラリ（OpenCV）を読み込めなかったため使用できません")
-            else:
-                mosaic_target = st.radio(
-                    "モザイクの対象",
-                    ["モザイクなし", "🍽️ お皿の外側をモザイク", "🙈 顔だけモザイク"],
-                    key="mosaic_target",
-                )
-                if mosaic_target != "モザイクなし":
-                    mosaic_grain = st.radio(
-                        "モザイクの粗さ", ["🔲 荒め", "🔳 細かめ"],
-                        horizontal=True, key="mosaic_grain",
+            st.divider()
+
+            # ==== 🎨 色味を変える ／ 🧩 モザイク処理（横並び） ====
+            col_color, col_mosaic = st.columns([1, 1], gap="medium")
+
+            # ---- 左：色味を変える（フィルターボタンのみ） ----
+            with col_color:
+                st.markdown("**🎨 色味を変える**")
+
+                if mask_ready:
+                    st.radio(
+                        "どこの色味を変える？", ["🍽️ 料理", "🖼️ 料理以外"],
+                        horizontal=True, key="color_target",
                     )
-                    is_coarse = mosaic_grain == "🔲 荒め"
-                    if st.button("✅ モザイクを適用して保存", key="apply_mosaic", use_container_width=True):
-                        if mosaic_target == "🍽️ お皿の外側をモザイク":
-                            plate_block = 26 if is_coarse else 10
+                    target_mask_for_preset = food_mask if st.session_state.get("color_target", "🍽️ 料理") == "🍽️ 料理" else (1.0 - food_mask)
+
+                original_img = st.session_state["_original_image"]
+                preset_params = {
+                    "muted_warm":    ("🍂 低彩度暖色", dict(brightness=10, contrast=-5, warmth=10, saturation=-10, shadows=5)),
+                    "natural_vivid": ("🌿 彩度高め",   dict(brightness=5,  contrast=10, warmth=0,  saturation=28,  shadows=-5)),
+                    "reduce_blue":   ("🔥 青み削り",   dict(brightness=0,  contrast=0,  warmth=28, saturation=5,   shadows=0)),
+                    "bright_pop":    ("✨ 明るくポップ", dict(brightness=18, contrast=8, warmth=5,  saturation=15,  shadows=12)),
+                    "cool_tone":     ("🧊 クールトーン", dict(brightness=0, contrast=5,  warmth=-15,saturation=-5,  shadows=0)),
+                    "high_contrast": ("🔲 高コントラスト", dict(brightness=0, contrast=25, warmth=0, saturation=5, shadows=-10)),
+                }
+                color_keys = list(preset_params.keys())
+                for row_start in range(0, len(color_keys), 2):
+                    ccols = st.columns(2)
+                    for i, ccol in enumerate(ccols):
+                        idx = row_start + i
+                        if idx >= len(color_keys):
+                            break
+                        style_key = color_keys[idx]
+                        label, params = preset_params[style_key]
+                        with ccol:
+                            if st.button(label, key=f"preset_{style_key}", use_container_width=True):
+                                if mask_ready:
+                                    st.session_state["_work_image"] = apply_adjustments_to_mask(original_img, target_mask_for_preset, **params)
+                                else:
+                                    st.session_state["_work_image"] = apply_insta_adjustments(original_img, **params)
+                                st.rerun()
+
+            # ---- 右：モザイク処理（ボタンのみ・即時反映） ----
+            with col_mosaic:
+                st.markdown("**🧩 モザイク処理**")
+
+                if not CV2_AVAILABLE or _FACE_CASCADE is None:
+                    st.warning("⚠️ 画像検出ライブラリが読み込めなかったため使用できません")
+                else:
+                    def _apply_mosaic(new_img):
+                        """モザイクを適用する前の状態を1回分だけ保存し、解除できるようにする"""
+                        st.session_state["_pre_mosaic_image"] = work_img.copy()
+                        st.session_state["_work_image"] = new_img
+                        st.rerun()
+
+                    mcols = st.columns(2)
+                    with mcols[0]:
+                        if st.button("🍽️ お皿の外側", key="mosaic_plate", use_container_width=True):
                             if mask_ready:
-                                result_img = mosaic_outside_mask(work_img, food_mask, block=plate_block)
+                                result_img = mosaic_outside_mask(work_img, food_mask, block=16)
                             else:
                                 with st.spinner("🔍 お皿を自動検出中..."):
-                                    result_img, detected = mosaic_background_outside_plate(work_img, block=plate_block)
-                        else:
-                            face_divisor = 4 if is_coarse else 14
-                            with st.spinner("🔍 Haar Cascadeで顔を検出中..."):
-                                result_img, n_faces = mosaic_faces(work_img, block_divisor=face_divisor)
-                        st.session_state["_work_image"] = result_img
+                                    result_img, _ = mosaic_background_outside_plate(work_img, block=16)
+                            _apply_mosaic(result_img)
+                    with mcols[1]:
+                        if st.button("🙈 顔だけ", key="mosaic_face", use_container_width=True):
+                            with st.spinner("🔍 顔を検出中..."):
+                                result_img, _ = mosaic_faces(work_img, block_divisor=8)
+                            _apply_mosaic(result_img)
+
+                    if st.button("↩️ モザイクを解除", key="mosaic_undo", use_container_width=True,
+                                 disabled=st.session_state.get("_pre_mosaic_image") is None):
+                        st.session_state["_work_image"] = st.session_state["_pre_mosaic_image"]
+                        st.session_state["_pre_mosaic_image"] = None
                         st.rerun()
+
+                    st.caption("🖌️ 自分でモザイク範囲を描く")
+                    if CANVAS_AVAILABLE:
+                        try:
+                            canvas_w = min(work_img.width, 420)
+                            canvas_scale = canvas_w / work_img.width
+                            canvas_h = int(work_img.height * canvas_scale)
+                            canvas_result = st_canvas(
+                                fill_color="rgba(255,0,0,0.35)",
+                                stroke_width=22,
+                                stroke_color="#FF3333",
+                                background_image=work_img.resize((canvas_w, canvas_h)),
+                                update_streamlit=True,
+                                height=canvas_h, width=canvas_w,
+                                drawing_mode="freedraw",
+                                key="mosaic_draw_canvas",
+                            )
+                            if st.button("🖌️ 描いた場所をモザイクにする", key="apply_draw_mosaic", use_container_width=True):
+                                if canvas_result is not None and canvas_result.image_data is not None:
+                                    alpha = canvas_result.image_data[:, :, 3]
+                                    drawn_small = (alpha > 0)
+                                    drawn_full = cv2.resize(
+                                        drawn_small.astype(np.uint8), (work_img.width, work_img.height),
+                                        interpolation=cv2.INTER_NEAREST,
+                                    ).astype(np.float32)
+                                    if drawn_full.max() > 0:
+                                        result_img = mosaic_within_mask(work_img, drawn_full, block=16)
+                                        _apply_mosaic(result_img)
+                                    else:
+                                        st.warning("まだ何も描かれていません")
+                        except Exception as _canvas_runtime_err:
+                            st.info("⚠️ この環境では「描いて指定」機能が使えませんでした（お皿・顔のボタンは通常通り使えます）")
+                    else:
+                        st.caption("（この環境では「描いて指定」ライブラリが読み込めませんでした）")
