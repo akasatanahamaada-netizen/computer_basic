@@ -1777,6 +1777,7 @@ with tab2:
         persist_log()
 
 <<<<<<< HEAD
+<<<<<<< HEAD
     # ---- よく使う運動（再認記憶：選び直さず一目で選べる） ----
     exercise_counts = {}
     for r in st.session_state.meal_log:
@@ -1858,8 +1859,57 @@ with tab3:
                         {recipe_steps}
                     </ol>
                 </div>
+=======
+    # ---- カロリーバー（最初から見える） ----
+    pop_bar(ratio / 100)
+    if ratio < 50:
+        st.warning(f"⚠️ あと {required - net_cal} kcal 必要です")
+    elif ratio < 90:
+        st.info(f"✅ もう少し！あと {required - net_cal} kcal")
+    elif ratio <= 110:
+        st.success("🎉 今日のカロリーは理想的です！")
+    else:
+        st.error(f"⚠️ {net_cal - required} kcal オーバーです")
+
+    # ---- カロリー内訳・AI分析（折りたたみ） ----
+    with st.expander("🔢 カロリー内訳・AIアドバイス", expanded=False):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("摂取", f"+{meal_cal}")
+        with col2:
+            st.metric("運動", f"-{exercise_cal}")
+        with col3:
+            st.metric("実質 / 目標", f"{net_cal} / {required}")
+
+        if st.button("🤖 AIで今日を分析（アドバイス＋おすすめ献立）", type="primary", use_container_width=True):
+            if not gemini_ready:
+                st.error("APIキーが設定されていません")
+            else:
+                with st.spinner("AIが1日分をまとめて分析中..."):
+                    result = generate_ai_advice(net_cal, required, consumed_nutrients, ideal, today_records)
+                st.session_state["_ai_result"] = result
+
+        ai_result = st.session_state.get("_ai_result")
+        if ai_result:
+            st.markdown(f"""
+            <div class="advice-card">
+                <div style="font-weight:800; color:var(--purple-dark); margin-bottom:8px; font-size:15px;">🤖 今日1日のアドバイス</div>
+                {ai_result['advice']}
+>>>>>>> parent of 8c288a6 (a)
             </div>
             """, unsafe_allow_html=True)
+            if ai_result.get("menu_name"):
+                recipe_steps = "".join(f"<li style='margin-bottom:6px;'>{step}</li>" for step in ai_result.get("recipe", []))
+                st.markdown(f"""
+                <div class="dish-card" style="border-color:var(--green); box-shadow:4px 4px 0px var(--green); margin-top:12px;">
+                    <div style="font-weight:800; font-size:16px;">🍳 次のおすすめ：{ai_result['menu_name']}</div>
+                    <div style="font-size:13px; color:#8A8494; margin-top:6px; font-weight:500;">{ai_result['menu_reason']}</div>
+                    <div style="margin-top:10px;">
+                        <div style="font-weight:700; font-size:13px; margin-bottom:4px;">かんたんな作り方</div>
+                        <ol style="font-size:13px; color:#5A5462; padding-left:20px; margin:0;">{recipe_steps}</ol>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
 
     st.divider()
 
