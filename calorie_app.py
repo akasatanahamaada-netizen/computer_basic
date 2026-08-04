@@ -2077,49 +2077,7 @@ with tab_photo:
                     use_container_width=True,
                 )
 
-        # ==== 🎨 色味を変える ====
-            st.markdown("**🎨 色味を変える**")
-
-            if mask_ready:
-                st.radio(
-                    "どこの色味を変える？", ["🍽️ 料理", "🖼️ 料理以外（背景・人物など）"],
-                    horizontal=True, key="color_target",
-                )
-                target_mask_for_preset = food_mask if st.session_state.get("color_target", "🍽️ 料理") == "🍽️ 料理" else (1.0 - food_mask)
-
-            original_img = st.session_state["_original_image"]
-
-            # ---- フィルター一覧（ボタンのみ・スライダーなし） ----
-            preset_params = {
-                "muted_warm":    ("🍂 低彩度・暖色寄り", dict(brightness=10, contrast=-5, warmth=10, saturation=-10, shadows=5)),
-                "natural_vivid": ("🌿 自然な彩度高め",   dict(brightness=5,  contrast=10, warmth=0,  saturation=28,  shadows=-5)),
-                "reduce_blue":   ("🔥 青み削り",         dict(brightness=0,  contrast=0,  warmth=28, saturation=5,   shadows=0)),
-                "bright_pop":    ("✨ 明るくポップ",     dict(brightness=18, contrast=8,  warmth=5,  saturation=15,  shadows=12)),
-                "cool_tone":     ("🧊 クールトーン",     dict(brightness=0,  contrast=5,  warmth=-15,saturation=-5,  shadows=0)),
-                "high_contrast": ("🔲 高コントラスト",   dict(brightness=0,  contrast=25, warmth=0,  saturation=5,   shadows=-10)),
-            }
-
-            # 2行×3列で配置
-            keys = list(preset_params.keys())
-            for row_start in range(0, len(keys), 3):
-                cols = st.columns(3)
-                for i, col in enumerate(cols):
-                    idx = row_start + i
-                    if idx >= len(keys):
-                        break
-                    style_key = keys[idx]
-                    label, params = preset_params[style_key]
-                    with col:
-                        if st.button(label, key=f"preset_{style_key}", use_container_width=True):
-                            if mask_ready:
-                                st.session_state["_work_image"] = apply_adjustments_to_mask(original_img, target_mask_for_preset, **params)
-                            else:
-                                st.session_state["_work_image"] = apply_insta_adjustments(original_img, **params)
-                            st.rerun()
-
-            st.divider()
-
-            st.divider()
+        
 
             # ==== 🎨 色味を変える ／ 🧩 モザイク処理（横並び） ====
             col_color, col_mosaic = st.columns([1, 1], gap="medium")
