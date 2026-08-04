@@ -24,6 +24,14 @@ except Exception as _cv2_err:
     CV2_AVAILABLE = False
     _cv2_import_error = str(_cv2_err)
 
+# HOG特徴量（お皿の「丸さ」判定の補強に使用）も同様に安全に読み込む
+try:
+    from skimage.feature import hog
+    HOG_AVAILABLE = True
+except Exception as _hog_err:
+    HOG_AVAILABLE = False
+    _hog_import_error = str(_hog_err)
+
 
 # streamlit-drawable-canvas（自由に描いてモザイク範囲を指定するUI）
 # 過去にStreamlitの非公開APIとの相性で実行時エラーが起きたことがあるため、
@@ -819,6 +827,31 @@ def _skin_mask(arr):
     cr, cb = ycrcb[:, :, 1], ycrcb[:, :, 2]
     return (cr >= 133) & (cr <= 178) & (cb >= 77) & (cb <= 127)
 
+def _hog_roundness_score(gray, x, y, bw, bh):
+    """
+    HOG特徴量（勾配方向ヒストグラム）を使って、その領域が
+    「丸い（お皿らしい）」か「四角い」かを判定する。
+
+    円・楕円は縁の勾配方向が全方位に分散するのに対し、四角形は
+    勾配方向が0度・90度付近に集中する。この性質を使い、勾配方向
+    ヒストグラムのエントロピー（分散の度合い）を「丸さスコア」とする。
+    0〜1で返し、1に近いほど丸い（お皿らしい）。
+    """
+    patch = gray[max(0, y):y + bh, max(0, x):x + bw]
+    if not HOG_AVAILABLE or patch.size == 0 or patch.shape[0] < 16 or patch.shape[1] < 16:
+        return 0.5  # 使えない・小さすぎる場合は中立値
+    try:
+        patch = cv2.resize(patch, (64, 64))
+        fd = hog(patch, orientations=9, pixels_per_cell=(8, 8),
+                  cells_per_block=(1, 1), feature_vector=True)
+        n_cells = fd.shape[0] // 9
+        orient_hist = fd.reshape(n_cells, 9).sum(axis=0)
+        orient_hist = orient_hist / (orient_hist.sum() + 1e-6)
+        entropy = -np.sum(orient_hist * np.log(orient_hist + 1e-9))
+        return float(entropy / np.log(9))  # 0〜1に正規化
+    except Exception:
+        return 0.5
+
 def detect_plate_outline_mask(image):
     """
     色を一切使わず、輪郭（エッジ）の形だけでお皿の大まかな外形を検出する。
@@ -829,10 +862,15 @@ def detect_plate_outline_mask(image):
     お皿の「縁」の輪郭が途切れるため、強めのブラー＋大きな閉じカーネルで
     模様を潰してから縁だけを拾う。それでも見つからなければ楕円フィッティングを試す。
 
+    候補が複数見つかった場合は、単純な面積の大小だけでなく、HOG特徴量による
+    「丸さスコア」も加味して最も皿らしい候補を選ぶ（四角いテーブルやランチョン
+    マットを誤って選ばないようにするため）。
+
     戻り値: (h, w) のbool配列（お皿の内側と思われる領域）。見つからなければNone。
     """
     arr = np.asarray(image.convert("RGB"))
     h, w = arr.shape[:2]
+    gray_full = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
 
     # --- 複数のパラメータで試行する（柄の多い皿→強いブラーが必要） ---
     candidates = []
@@ -866,7 +904,10 @@ def detect_plate_outline_mask(image):
             x, y, bw, bh = cv2.boundingRect(c)
             aspect = bw / max(bh, 1)
             if 0.55 <= extent <= 0.92 and 0.3 <= aspect <= 3.0:
-                candidates.append((c, area))
+                # HOGで「丸さ」を追加スコアリングし、面積と組み合わせた総合スコアにする
+                roundness = _hog_roundness_score(gray_full, x, y, bw, bh)
+                score = area * (0.5 + 0.5 * roundness)  # 丸いほど加点、四角いほど減点
+                candidates.append((c, score))
 
     if not candidates:
         return None
