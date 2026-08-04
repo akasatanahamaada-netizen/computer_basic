@@ -1710,7 +1710,15 @@ with tab2:
         st.toast(f"「{name}」を記録しました（消費 {burned} kcal）", icon="✅")
         persist_log()
 
-    # ---- カロリーバー（最初から見える） ----
+    # ---- 今日のカロリー（最重要情報を一番上にコンパクトに表示） ----
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("摂取", f"+{meal_cal}")
+    with col2:
+        st.metric("運動", f"-{exercise_cal}")
+    with col3:
+        st.metric("実質 / 目標", f"{net_cal} / {required}")
+
     pop_bar(ratio / 100)
     if ratio < 50:
         st.warning(f"⚠️ あと {required - net_cal} kcal 必要です")
@@ -1721,44 +1729,93 @@ with tab2:
     else:
         st.error(f"⚠️ {net_cal - required} kcal オーバーです")
 
-    # ---- カロリー内訳・AI分析（折りたたみ） ----
-    with st.expander("🔢 カロリー内訳・AIアドバイス", expanded=False):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("摂取", f"+{meal_cal}")
-        with col2:
-            st.metric("運動", f"-{exercise_cal}")
-        with col3:
-            st.metric("実質 / 目標", f"{net_cal} / {required}")
+    # ---- 📈 直近7日間の推移（常時表示・折りたたまない） ----
+    log = st.session_state.meal_log
+    today_d = date.today()
+    last7_dates = [(today_d - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
 
-        if st.button("🤖 AIで今日を分析（アドバイス＋おすすめ献立）", type="primary", use_container_width=True):
-            if not gemini_ready:
-                st.error("APIキーが設定されていません")
+    daily = {d: {"meal": 0, "exercise": 0} for d in last7_dates}
+    for r in log:
+        d = r["date"]
+        if d in daily:
+            if r["type"] == "meal":
+                daily[d]["meal"] += r["calories"]
             else:
-                with st.spinner("AIが1日分をまとめて分析中..."):
-                    result = generate_ai_advice(net_cal, required, consumed_nutrients, ideal, today_records)
-                st.session_state["_ai_result"] = result
+                daily[d]["exercise"] += r["calories"]
 
-        ai_result = st.session_state.get("_ai_result")
-        if ai_result:
+    chart_rows = []
+    for d in last7_dates:
+        label = "/".join(d.split("-")[1:])
+        chart_rows.append({"日付": label, "種類": "摂取カロリー", "kcal": daily[d]["meal"]})
+        chart_rows.append({"日付": label, "種類": "運動消費", "kcal": daily[d]["exercise"]})
+    bar_df = pd.DataFrame(chart_rows)
+
+    bar_chart = (
+        alt.Chart(bar_df)
+        .mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8)
+        .encode(
+            x=alt.X("日付:N", sort=None, title=None),
+            xOffset="種類:N",
+            y=alt.Y("kcal:Q", scale=alt.Scale(domain=[0, max(1, bar_df['kcal'].max() * 1.15)]), title="kcal"),
+            color=alt.Color("種類:N", scale=alt.Scale(range=["#FF6B6B", "#3DCCC7"]), legend=alt.Legend(title=None, orient="top")),
+            tooltip=["日付", "種類", "kcal"],
+        )
+        .properties(height=220)
+    )
+    st.altair_chart(bar_chart, use_container_width=True)
+
+    net_df = pd.DataFrame({
+        "日付": ["/".join(d.split("-")[1:]) for d in last7_dates],
+        "実質カロリー": [daily[d]["meal"] - daily[d]["exercise"] for d in last7_dates],
+    })
+    net_max = max(required * 1.15, net_df["実質カロリー"].max() * 1.15, 1)
+    line_chart = (
+        alt.Chart(net_df)
+        .mark_line(point=alt.OverlayMarkDef(size=90, filled=True, color="#9B7EDE"), color="#9B7EDE", strokeWidth=3)
+        .encode(
+            x=alt.X("日付:N", sort=None, title=None),
+            y=alt.Y("実質カロリー:Q", scale=alt.Scale(domain=[0, net_max])),
+            tooltip=["日付", "実質カロリー"],
+        )
+        .properties(height=160)
+    )
+    goal_line = (
+        alt.Chart(pd.DataFrame({"目標": [required]}))
+        .mark_rule(color="#FFC93C", strokeDash=[6, 4], strokeWidth=2.5)
+        .encode(y="目標:Q")
+    )
+    st.altair_chart(line_chart + goal_line, use_container_width=True)
+    st.caption(f"🟡 点線は目標カロリー（{required} kcal / 日）")
+
+    # ---- 🤖 AI分析 ----
+    if st.button("🤖 AIで今日を分析（アドバイス＋おすすめ献立）", type="primary", use_container_width=True):
+        if not gemini_ready:
+            st.error("APIキーが設定されていません")
+        else:
+            with st.spinner("AIが1日分をまとめて分析中..."):
+                result = generate_ai_advice(net_cal, required, consumed_nutrients, ideal, today_records)
+            st.session_state["_ai_result"] = result
+
+    ai_result = st.session_state.get("_ai_result")
+    if ai_result:
+        st.markdown(f"""
+        <div class="advice-card">
+            <div style="font-weight:800; color:var(--purple-dark); margin-bottom:8px; font-size:15px;">🤖 今日1日のアドバイス</div>
+            {ai_result['advice']}
+        </div>
+        """, unsafe_allow_html=True)
+        if ai_result.get("menu_name"):
+            recipe_steps = "".join(f"<li style='margin-bottom:6px;'>{step}</li>" for step in ai_result.get("recipe", []))
             st.markdown(f"""
-            <div class="advice-card">
-                <div style="font-weight:800; color:var(--purple-dark); margin-bottom:8px; font-size:15px;">🤖 今日1日のアドバイス</div>
-                {ai_result['advice']}
+            <div class="dish-card" style="border-color:var(--green); box-shadow:4px 4px 0px var(--green); margin-top:12px;">
+                <div style="font-weight:800; font-size:16px;">🍳 次のおすすめ：{ai_result['menu_name']}</div>
+                <div style="font-size:13px; color:#8A8494; margin-top:6px; font-weight:500;">{ai_result['menu_reason']}</div>
+                <div style="margin-top:10px;">
+                    <div style="font-weight:700; font-size:13px; margin-bottom:4px;">かんたんな作り方</div>
+                    <ol style="font-size:13px; color:#5A5462; padding-left:20px; margin:0;">{recipe_steps}</ol>
+                </div>
             </div>
             """, unsafe_allow_html=True)
-            if ai_result.get("menu_name"):
-                recipe_steps = "".join(f"<li style='margin-bottom:6px;'>{step}</li>" for step in ai_result.get("recipe", []))
-                st.markdown(f"""
-                <div class="dish-card" style="border-color:var(--green); box-shadow:4px 4px 0px var(--green); margin-top:12px;">
-                    <div style="font-weight:800; font-size:16px;">🍳 次のおすすめ：{ai_result['menu_name']}</div>
-                    <div style="font-size:13px; color:#8A8494; margin-top:6px; font-weight:500;">{ai_result['menu_reason']}</div>
-                    <div style="margin-top:10px;">
-                        <div style="font-weight:700; font-size:13px; margin-bottom:4px;">かんたんな作り方</div>
-                        <ol style="font-size:13px; color:#5A5462; padding-left:20px; margin:0;">{recipe_steps}</ol>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
 
     # ---- 🏃 運動を記録（折りたたみ） ----
     with st.expander("🏃 運動を記録する", expanded=False):
@@ -1830,65 +1887,6 @@ with tab2:
                 <div style="font-size:12px; color:#8A8494; margin-top:6px; font-weight:500;">{c_label}</div>
             </div>
             """, unsafe_allow_html=True)
-
-    # ---- 📈 履歴グラフ（折りたたみ） ----
-    with st.expander("📈 直近7日間の推移", expanded=True):
-        log = st.session_state.meal_log
-        today_d = date.today()
-        last7_dates = [(today_d - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
-
-        daily = {d: {"meal": 0, "exercise": 0} for d in last7_dates}
-        for r in log:
-            d = r["date"]
-            if d in daily:
-                if r["type"] == "meal":
-                    daily[d]["meal"] += r["calories"]
-                else:
-                    daily[d]["exercise"] += r["calories"]
-
-        chart_rows = []
-        for d in last7_dates:
-            label = "/".join(d.split("-")[1:])
-            chart_rows.append({"日付": label, "種類": "摂取カロリー", "kcal": daily[d]["meal"]})
-            chart_rows.append({"日付": label, "種類": "運動消費", "kcal": daily[d]["exercise"]})
-        bar_df = pd.DataFrame(chart_rows)
-
-        bar_chart = (
-            alt.Chart(bar_df)
-            .mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8)
-            .encode(
-                x=alt.X("日付:N", sort=None, title=None),
-                xOffset="種類:N",
-                y=alt.Y("kcal:Q", scale=alt.Scale(domain=[0, max(1, bar_df['kcal'].max() * 1.15)]), title="kcal"),
-                color=alt.Color("種類:N", scale=alt.Scale(range=["#FF6B6B", "#3DCCC7"]), legend=alt.Legend(title=None, orient="top")),
-                tooltip=["日付", "種類", "kcal"],
-            )
-            .properties(height=260)
-        )
-        st.altair_chart(bar_chart, use_container_width=True)
-
-        net_df = pd.DataFrame({
-            "日付": ["/".join(d.split("-")[1:]) for d in last7_dates],
-            "実質カロリー": [daily[d]["meal"] - daily[d]["exercise"] for d in last7_dates],
-        })
-        net_max = max(required * 1.15, net_df["実質カロリー"].max() * 1.15, 1)
-        line_chart = (
-            alt.Chart(net_df)
-            .mark_line(point=alt.OverlayMarkDef(size=90, filled=True, color="#9B7EDE"), color="#9B7EDE", strokeWidth=3)
-            .encode(
-                x=alt.X("日付:N", sort=None, title=None),
-                y=alt.Y("実質カロリー:Q", scale=alt.Scale(domain=[0, net_max])),
-                tooltip=["日付", "実質カロリー"],
-            )
-            .properties(height=180)
-        )
-        goal_line = (
-            alt.Chart(pd.DataFrame({"目標": [required]}))
-            .mark_rule(color="#FFC93C", strokeDash=[6, 4], strokeWidth=2.5)
-            .encode(y="目標:Q")
-        )
-        st.altair_chart(line_chart + goal_line, use_container_width=True)
-        st.caption(f"🟡 点線は目標カロリー（{required} kcal / 日）")
 
     # ---- 📋 今日の記録一覧（折りたたみ） ----
     with st.expander(f"📋 今日の記録一覧（{len(today_records)}件）", expanded=False):
