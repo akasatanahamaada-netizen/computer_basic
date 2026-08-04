@@ -1,7 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
 import requests
-from PIL import Image, ImageEnhance, ImageDraw
+from PIL import Image, ImageEnhance, ImageDraw, ImageFilter
 import numpy as np
 import json
 import re
@@ -1058,6 +1058,18 @@ def enhance_food_in_selection(image, roi_box, brightness=8, contrast=12, warmth=
     coverage = float(food_mask.mean())
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)), coverage
 
+def _blur_mask_edges(mask):
+    """
+    マスクの境界をぼかして滑らかにする。cv2が使える場合はGaussianBlurを使い、
+    使えない環境（CV2_AVAILABLE=False）でもcrashしないよう、PILのぼかしに
+    フォールバックする（色味フィルターはCV2の有無に関係なく常に使える機能のため）。
+    """
+    if CV2_AVAILABLE:
+        return cv2.GaussianBlur(mask, (25, 25), 0)
+    mask_img = Image.fromarray((mask * 255).astype(np.uint8))
+    mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=8))
+    return np.asarray(mask_img).astype(np.float32) / 255.0
+
 def apply_adjustments_to_mask(image, mask, brightness=0, contrast=0, warmth=0, saturation=0, shadows=0):
     """
     あらかじめ用意したマスク（0〜1のnumpy配列）の範囲だけに色味補正をかける汎用関数。
@@ -1071,8 +1083,8 @@ def apply_adjustments_to_mask(image, mask, brightness=0, contrast=0, warmth=0, s
     # マスクがすでに滑らかなグラデーションを持っているか判定
     unique_vals = len(np.unique(mask[:100, :100].round(2)))  # サンプル領域で確認
     if unique_vals <= 3:
-        # ほぼ二値マスク → ガウシアンぼかしで境界を滑らかに
-        mask = cv2.GaussianBlur(mask, (25, 25), 0)
+        # ほぼ二値マスク → ぼかして境界を滑らかに（CV2がなくても動く）
+        mask = _blur_mask_edges(mask)
 
     enhanced = apply_insta_adjustments(
         image, brightness=brightness, contrast=contrast,
