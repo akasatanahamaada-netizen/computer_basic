@@ -1534,8 +1534,8 @@ if not st.session_state.user_id:
     st.info("👈 左のサイドバーで「ニックネーム」を入力すると、あなた専用の記録が始まります！")
     st.stop()
 
-tab1, tab_photo, tab2, tab3, tab4 = st.tabs([
-    "🍽️ 食事を記録", "🎨 写真を加工", "🏃 運動を記録", "📊 今日のまとめ", "📈 履歴グラフ",
+tab1, tab_photo, tab2 = st.tabs([
+    "🍽️ 食事を記録", "🎨 写真を加工", "📊 記録・まとめ",
 ])
 
 # ================================================================
@@ -1680,49 +1680,7 @@ with tab1:
 # タブ2：運動を記録
 # ================================================================
 with tab2:
-    st.subheader("今日行った運動を記録")
-
-    def log_exercise(name):
-        burned = int(EXERCISE_DATABASE[name] * weight)
-        st.session_state.meal_log.append({
-            "id": str(uuid.uuid4()),
-            "date": date.today().strftime("%Y-%m-%d"),
-            "time": datetime.now().strftime("%H:%M"),
-            "type": "exercise",
-            "name": name,
-            "calories": burned,
-        })
-        st.toast(f"「{name}」を記録しました（消費 {burned} kcal）", icon="✅")
-        persist_log()
-
-    # ---- よく使う運動（再認記憶：選び直さず一目で選べる） ----
-    exercise_counts = {}
-    for r in st.session_state.meal_log:
-        if r["type"] == "exercise":
-            exercise_counts[r["name"]] = exercise_counts.get(r["name"], 0) + 1
-    frequent_exercises = sorted(exercise_counts, key=exercise_counts.get, reverse=True)[:3]
-
-    if frequent_exercises:
-        st.markdown("**よく記録する運動（タップで即記録）**")
-        cols = st.columns(len(frequent_exercises))
-        for i, name in enumerate(frequent_exercises):
-            with cols[i]:
-                if st.button(f"⚡ {name}", key=f"quick_ex_{name}", use_container_width=True):
-                    log_exercise(name)
-                    st.rerun()
-        st.markdown("&nbsp;", unsafe_allow_html=True)
-
-    # ---- すべての運動から選ぶ ----
-    exercise_name = st.selectbox("その他の運動から選ぶ", list(EXERCISE_DATABASE.keys()))
-    if st.button("🏃 運動を記録", type="primary"):
-        log_exercise(exercise_name)
-        st.rerun()
-
-# ================================================================
-# タブ3：今日のまとめ
-# ================================================================
-with tab3:
-    st.subheader(f"📊 今日のまとめ（{date.today().strftime('%Y年%m月%d日')}）")
+    st.subheader(f"📊 {date.today().strftime('%Y年%m月%d日')}の記録")
 
     today_records = get_today_records()
     meal_cal = sum(r["calories"] for r in today_records if r["type"] == "meal")
@@ -1737,11 +1695,42 @@ with tab3:
             consumed_nutrients["vitamins"] += r.get("vitamins", [])
             consumed_nutrients["minerals"] += r.get("minerals", [])
     consumed_nutrients["salt"] = round(consumed_nutrients["salt"], 1)
-
     ratio = net_cal / required * 100 if required > 0 else 0
 
-    # ---- 🤖 AI分析（一番上に配置） ----
-    if st.button("🤖 AIで今日を分析（アドバイス＋次のおすすめ献立）", type="primary", use_container_width=True):
+    def log_exercise(name):
+        burned = int(EXERCISE_DATABASE[name] * weight)
+        st.session_state.meal_log.append({
+            "id": str(uuid.uuid4()),
+            "date": date.today().strftime("%Y-%m-%d"),
+            "time": datetime.now().strftime("%H:%M"),
+            "type": "exercise",
+            "name": name,
+            "calories": burned,
+        })
+        st.toast(f"「{name}」を記録しました（消費 {burned} kcal）", icon="✅")
+        persist_log()
+
+    # ---- 今日のカロリー（最重要情報を一番上にコンパクトに表示） ----
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("摂取", f"+{meal_cal}")
+    with col2:
+        st.metric("運動", f"-{exercise_cal}")
+    with col3:
+        st.metric("実質 / 目標", f"{net_cal} / {required}")
+
+    pop_bar(ratio / 100)
+    if ratio < 50:
+        st.warning(f"⚠️ あと {required - net_cal} kcal 必要です")
+    elif ratio < 90:
+        st.info(f"✅ もう少し！あと {required - net_cal} kcal")
+    elif ratio <= 110:
+        st.success("🎉 今日のカロリーは理想的です！")
+    else:
+        st.error(f"⚠️ {net_cal - required} kcal オーバーです")
+
+    # ---- 🤖 AI分析 ----
+    if st.button("🤖 AIで今日を分析（アドバイス＋おすすめ献立）", type="primary", use_container_width=True):
         if not gemini_ready:
             st.error("APIキーが設定されていません")
         else:
@@ -1757,213 +1746,178 @@ with tab3:
             {ai_result['advice']}
         </div>
         """, unsafe_allow_html=True)
-
         if ai_result.get("menu_name"):
-            recipe_steps = "".join(
-                f"<li style='margin-bottom:6px;'>{step}</li>" for step in ai_result.get("recipe", [])
-            )
+            recipe_steps = "".join(f"<li style='margin-bottom:6px;'>{step}</li>" for step in ai_result.get("recipe", []))
             st.markdown(f"""
             <div class="dish-card" style="border-color:var(--green); box-shadow:4px 4px 0px var(--green); margin-top:12px;">
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <span style="font-weight:800; font-size:16px;">🍳 次の食事のおすすめ：{ai_result['menu_name']}</span>
-                </div>
-                <div style="font-size:13px; color:#8A8494; margin-top:6px; font-weight:500;">
-                    {ai_result['menu_reason']}
-                </div>
+                <div style="font-weight:800; font-size:16px;">🍳 次のおすすめ：{ai_result['menu_name']}</div>
+                <div style="font-size:13px; color:#8A8494; margin-top:6px; font-weight:500;">{ai_result['menu_reason']}</div>
                 <div style="margin-top:10px;">
                     <div style="font-weight:700; font-size:13px; margin-bottom:4px;">かんたんな作り方</div>
-                    <ol style="font-size:13px; color:#5A5462; padding-left:20px; margin:0;">
-                        {recipe_steps}
-                    </ol>
+                    <ol style="font-size:13px; color:#5A5462; padding-left:20px; margin:0;">{recipe_steps}</ol>
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
-    st.divider()
+    # ---- 🏃 運動を記録（折りたたみ） ----
+    with st.expander("🏃 運動を記録する", expanded=False):
+        exercise_counts = {}
+        for r in st.session_state.meal_log:
+            if r["type"] == "exercise":
+                exercise_counts[r["name"]] = exercise_counts.get(r["name"], 0) + 1
+        frequent_exercises = sorted(exercise_counts, key=exercise_counts.get, reverse=True)[:3]
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("摂取カロリー", f"+{meal_cal} kcal")
-    with col2:
-        st.metric("運動で消費", f"-{exercise_cal} kcal")
-    with col3:
-        st.metric("実質カロリー", f"{net_cal} / {required} kcal")
+        if frequent_exercises:
+            st.caption("よく記録する運動（タップで即記録）")
+            ex_cols = st.columns(len(frequent_exercises))
+            for i, name in enumerate(frequent_exercises):
+                with ex_cols[i]:
+                    if st.button(f"⚡ {name}", key=f"quick_ex_{name}", use_container_width=True):
+                        log_exercise(name)
+                        st.rerun()
 
-    pop_bar(ratio / 100)
-    st.caption("🔴 摂取した分　🔵 まだ足りない分")
-    if ratio < 50:
-        st.warning(f"⚠️ カロリーが不足しています。あと {required - net_cal} kcal 必要です。")
-    elif ratio < 90:
-        st.info(f"✅ もう少しで目標達成！あと {required - net_cal} kcal です。")
-    elif ratio <= 110:
-        st.success("🎉 今日のカロリーは理想的です！")
-    else:
-        st.error(f"⚠️ {net_cal - required} kcal オーバーです。運動で消費しましょう。")
+        exercise_name = st.selectbox("その他の運動から選ぶ", list(EXERCISE_DATABASE.keys()))
+        if st.button("🏃 運動を記録", type="primary", use_container_width=True):
+            log_exercise(exercise_name)
+            st.rerun()
 
-    st.subheader("🥗 五大栄養素のバランス")
-    st.caption("炭水化物・タンパク質・脂質は「目安まで摂りたい」栄養素、糖質・塩分は「摂りすぎ注意」の栄養素です")
+    # ---- 🥗 五大栄養素の詳細（折りたたみ） ----
+    with st.expander("🥗 五大栄養素の詳細", expanded=False):
+        st.caption("炭水化物・タンパク質・脂質は「目安まで摂りたい」栄養素、糖質・塩分は「摂りすぎ注意」の栄養素です")
 
-    col_a, col_b, col_c = st.columns(3)
-    main_cols = {"carb": col_a, "protein": col_b, "fat": col_c}
-    for key, col in main_cols.items():
-        with col:
-            status, color, nratio = nutrient_status(consumed_nutrients[key], ideal[key])
-            st.metric(NUTRIENT_LABELS[key], f"{consumed_nutrients[key]}g / {ideal[key]}g")
-            pop_bar(nratio / 100, height=14)
-            st.markdown(
-                f"<span class='badge' style='background:{color};'>{status}</span>",
-                unsafe_allow_html=True,
-            )
+        col_a, col_b, col_c = st.columns(3)
+        main_cols = {"carb": col_a, "protein": col_b, "fat": col_c}
+        for key, col in main_cols.items():
+            with col:
+                status, color, nratio = nutrient_status(consumed_nutrients[key], ideal[key])
+                st.metric(NUTRIENT_LABELS[key], f"{consumed_nutrients[key]}g / {ideal[key]}g")
+                pop_bar(nratio / 100, height=14)
+                st.markdown(f"<span class='badge' style='background:{color};'>{status}</span>", unsafe_allow_html=True)
 
-    col_d, col_e = st.columns(2)
-    limit_cols = {"sugar": col_d, "salt": col_e}
-    for key, col in limit_cols.items():
-        with col:
-            status, color, nratio = limit_status(consumed_nutrients[key], ideal[key])
-            unit = "g"
-            st.metric(f"{NUTRIENT_LABELS[key]}（上限目安）", f"{consumed_nutrients[key]}{unit} / {ideal[key]}{unit}")
-            pop_bar(nratio / 100, height=14)
-            st.markdown(
-                f"<span class='badge' style='background:{color};'>{status}</span>",
-                unsafe_allow_html=True,
-            )
+        col_d, col_e = st.columns(2)
+        limit_cols = {"sugar": col_d, "salt": col_e}
+        for key, col in limit_cols.items():
+            with col:
+                status, color, nratio = limit_status(consumed_nutrients[key], ideal[key])
+                st.metric(f"{NUTRIENT_LABELS[key]}（上限目安）", f"{consumed_nutrients[key]}g / {ideal[key]}g")
+                pop_bar(nratio / 100, height=14)
+                st.markdown(f"<span class='badge' style='background:{color};'>{status}</span>", unsafe_allow_html=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    vit_set = sorted(set(consumed_nutrients.get("vitamins", [])))
-    min_set = sorted(set(consumed_nutrients.get("minerals", [])))
-    vit_tags = "".join(f"<span class='badge' style='background:var(--sunny); color:#2D2A32; margin:2px;'>{v}</span>" for v in vit_set)
-    min_tags = "".join(f"<span class='badge' style='background:var(--green); margin:2px;'>{m}</span>" for m in min_set)
-    st.markdown(f"""
-    <div class="pop-card" style="background:#FFFFFF;">
-        <div style="font-weight:800; margin-bottom:8px;">🌈 今日摂れたビタミン・ミネラル</div>
-        <div style="margin-bottom:4px;">{vit_tags if vit_tags else "<span style='color:#8A8494; font-size:13px;'>まだ記録がありません</span>"}</div>
-        <div>{min_tags}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ---- 今日の平均彩りスコア（自作CV処理の結果を1日単位で集計） ----
-    color_scores = [r["color_score"] for r in today_records if r.get("color_score") is not None]
-    if color_scores:
-        avg_color = int(round(sum(color_scores) / len(color_scores)))
-        if avg_color >= 75:
-            c_col, c_label = "#27AE60", "彩り豊かな1日でした"
-        elif avg_color >= 50:
-            c_col, c_label = "#E67E22", "まずまずの彩りです"
-        else:
-            c_col, c_label = "#E74C3C", "色が偏りぎみです。野菜を足しましょう"
+        vit_set = sorted(set(consumed_nutrients.get("vitamins", [])))
+        min_set = sorted(set(consumed_nutrients.get("minerals", [])))
+        vit_tags = "".join(f"<span class='badge' style='background:var(--sunny); color:#2D2A32; margin:2px;'>{v}</span>" for v in vit_set)
+        min_tags = "".join(f"<span class='badge' style='background:var(--green); margin:2px;'>{m}</span>" for m in min_set)
         st.markdown(f"""
         <div class="pop-card" style="background:#FFFFFF; margin-top:10px;">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <span style="font-weight:800; font-size:15px;">🎨 今日の平均彩りスコア</span>
-                <span class="badge" style="background:{c_col};">{avg_color}点</span>
-            </div>
-            <div style="font-size:12px; color:#8A8494; margin-top:6px; font-weight:500;">
-                {c_label}（{len(color_scores)}件の食事写真から算出）
-            </div>
+            <div style="font-weight:800; margin-bottom:8px;">🌈 今日摂れたビタミン・ミネラル</div>
+            <div style="margin-bottom:4px;">{vit_tags if vit_tags else "<span style='color:#8A8494; font-size:13px;'>まだ記録がありません</span>"}</div>
+            <div>{min_tags}</div>
         </div>
         """, unsafe_allow_html=True)
-        pop_bar(avg_color / 100, height=14)
 
-    st.subheader("今日の記録")
-    if today_records:
-        for r in today_records:
-            icon = "🍽" if r["type"] == "meal" else "🏃"
-            sign = "+" if r["type"] == "meal" else "-"
-            color = "#e94560" if r["type"] == "meal" else "#3498db"
-            row_col1, row_col2 = st.columns([6, 1])
-            with row_col1:
-                color = "var(--coral-dark)" if r["type"] == "meal" else "var(--turquoise-dark)"
-                st.markdown(f"""
-                <div class="record-item">
-                    <span>{icon} {r['name']}（{r['time']}）</span>
-                    <span style="color:{color}; font-weight:800;">
-                        {sign}{r['calories']} kcal
-                    </span>
+        color_scores = [r["color_score"] for r in today_records if r.get("color_score") is not None]
+        if color_scores:
+            avg_color = int(round(sum(color_scores) / len(color_scores)))
+            c_col = "#27AE60" if avg_color >= 75 else "#E67E22" if avg_color >= 50 else "#E74C3C"
+            c_label = "彩り豊かな1日でした" if avg_color >= 75 else "まずまずの彩りです" if avg_color >= 50 else "色が偏りぎみです"
+            st.markdown(f"""
+            <div class="pop-card" style="background:#FFFFFF; margin-top:10px;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-weight:800; font-size:15px;">🎨 今日の平均彩りスコア</span>
+                    <span class="badge" style="background:{c_col};">{avg_color}点</span>
                 </div>
-                """, unsafe_allow_html=True)
-            with row_col2:
-                if st.button("削除", key=f"del_{r['id']}"):
-                    st.session_state.meal_log = [
-                        m for m in st.session_state.meal_log if m["id"] != r["id"]
-                    ]
-                    persist_log()
-                    st.rerun()
-    else:
-        st.info("📸 まずは「食事を記録」タブから、今日食べたものを撮ってみましょう")
+                <div style="font-size:12px; color:#8A8494; margin-top:6px; font-weight:500;">{c_label}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
-# ================================================================
-# タブ4：履歴グラフ
-# ================================================================
-with tab4:
-    st.subheader("📈 カロリー推移（直近7日間）")
+    # ---- 📈 履歴グラフ（折りたたみ） ----
+    with st.expander("📈 直近7日間の推移", expanded=False):
+        log = st.session_state.meal_log
+        today_d = date.today()
+        last7_dates = [(today_d - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
 
-    log = st.session_state.meal_log
+        daily = {d: {"meal": 0, "exercise": 0} for d in last7_dates}
+        for r in log:
+            d = r["date"]
+            if d in daily:
+                if r["type"] == "meal":
+                    daily[d]["meal"] += r["calories"]
+                else:
+                    daily[d]["exercise"] += r["calories"]
 
-    # 直近7日間（今日を含む）を必ず表示する
-    today_d = date.today()
-    last7_dates = [(today_d - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
+        chart_rows = []
+        for d in last7_dates:
+            label = "/".join(d.split("-")[1:])
+            chart_rows.append({"日付": label, "種類": "摂取カロリー", "kcal": daily[d]["meal"]})
+            chart_rows.append({"日付": label, "種類": "運動消費", "kcal": daily[d]["exercise"]})
+        bar_df = pd.DataFrame(chart_rows)
 
-    daily = {d: {"meal": 0, "exercise": 0} for d in last7_dates}
-    for r in log:
-        d = r["date"]
-        if d in daily:
-            if r["type"] == "meal":
-                daily[d]["meal"] += r["calories"]
-            else:
-                daily[d]["exercise"] += r["calories"]
-
-    chart_rows = []
-    for d in last7_dates:
-        label = "/".join(d.split("-")[1:])
-        chart_rows.append({"日付": label, "種類": "摂取カロリー", "kcal": daily[d]["meal"]})
-        chart_rows.append({"日付": label, "種類": "運動消費", "kcal": daily[d]["exercise"]})
-
-    bar_df = pd.DataFrame(chart_rows)
-
-    bar_chart = (
-        alt.Chart(bar_df)
-        .mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8)
-        .encode(
-            x=alt.X("日付:N", sort=None, title=None),
-            xOffset="種類:N",
-            y=alt.Y("kcal:Q", scale=alt.Scale(domain=[0, max(1, bar_df['kcal'].max() * 1.15)]), title="kcal"),
-            color=alt.Color("種類:N", scale=alt.Scale(range=["#FF6B6B", "#3DCCC7"]), legend=alt.Legend(title=None, orient="top")),
-            tooltip=["日付", "種類", "kcal"],
+        bar_chart = (
+            alt.Chart(bar_df)
+            .mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8)
+            .encode(
+                x=alt.X("日付:N", sort=None, title=None),
+                xOffset="種類:N",
+                y=alt.Y("kcal:Q", scale=alt.Scale(domain=[0, max(1, bar_df['kcal'].max() * 1.15)]), title="kcal"),
+                color=alt.Color("種類:N", scale=alt.Scale(range=["#FF6B6B", "#3DCCC7"]), legend=alt.Legend(title=None, orient="top")),
+                tooltip=["日付", "種類", "kcal"],
+            )
+            .properties(height=260)
         )
-        .properties(height=300)
-    )
-    st.altair_chart(bar_chart, use_container_width=True)
+        st.altair_chart(bar_chart, use_container_width=True)
 
-    net_df = pd.DataFrame({
-        "日付": ["/".join(d.split("-")[1:]) for d in last7_dates],
-        "実質カロリー": [daily[d]["meal"] - daily[d]["exercise"] for d in last7_dates],
-    })
-    net_max = max(required * 1.15, net_df["実質カロリー"].max() * 1.15, 1)
-
-    line_chart = (
-        alt.Chart(net_df)
-        .mark_line(point=alt.OverlayMarkDef(size=90, filled=True, color="#9B7EDE"), color="#9B7EDE", strokeWidth=3)
-        .encode(
-            x=alt.X("日付:N", sort=None, title=None),
-            y=alt.Y("実質カロリー:Q", scale=alt.Scale(domain=[0, net_max])),
-            tooltip=["日付", "実質カロリー"],
+        net_df = pd.DataFrame({
+            "日付": ["/".join(d.split("-")[1:]) for d in last7_dates],
+            "実質カロリー": [daily[d]["meal"] - daily[d]["exercise"] for d in last7_dates],
+        })
+        net_max = max(required * 1.15, net_df["実質カロリー"].max() * 1.15, 1)
+        line_chart = (
+            alt.Chart(net_df)
+            .mark_line(point=alt.OverlayMarkDef(size=90, filled=True, color="#9B7EDE"), color="#9B7EDE", strokeWidth=3)
+            .encode(
+                x=alt.X("日付:N", sort=None, title=None),
+                y=alt.Y("実質カロリー:Q", scale=alt.Scale(domain=[0, net_max])),
+                tooltip=["日付", "実質カロリー"],
+            )
+            .properties(height=180)
         )
-        .properties(height=220)
-    )
-    goal_line = (
-        alt.Chart(pd.DataFrame({"目標": [required]}))
-        .mark_rule(color="#FFC93C", strokeDash=[6, 4], strokeWidth=2.5)
-        .encode(y="目標:Q")
-    )
-    st.altair_chart(line_chart + goal_line, use_container_width=True)
-    st.caption(f"🟡 点線は目標カロリー（{required} kcal / 日）を示しています。棒グラフ・折れ線グラフともに0kcalから表示しています。")
+        goal_line = (
+            alt.Chart(pd.DataFrame({"目標": [required]}))
+            .mark_rule(color="#FFC93C", strokeDash=[6, 4], strokeWidth=2.5)
+            .encode(y="目標:Q")
+        )
+        st.altair_chart(line_chart + goal_line, use_container_width=True)
+        st.caption(f"🟡 点線は目標カロリー（{required} kcal / 日）")
 
-    st.divider()
-    if st.button("🗑 記録を全削除", type="secondary"):
-        st.session_state.meal_log = []
-        persist_log()
-        st.success("すべての記録を削除しました")
-        st.rerun()
+    # ---- 📋 今日の記録一覧（折りたたみ） ----
+    with st.expander(f"📋 今日の記録一覧（{len(today_records)}件）", expanded=False):
+        if today_records:
+            for r in today_records:
+                icon = "🍽" if r["type"] == "meal" else "🏃"
+                sign = "+" if r["type"] == "meal" else "-"
+                row_col1, row_col2 = st.columns([6, 1])
+                with row_col1:
+                    color = "var(--coral-dark)" if r["type"] == "meal" else "var(--turquoise-dark)"
+                    st.markdown(f"""
+                    <div class="record-item">
+                        <span>{icon} {r['name']}（{r['time']}）</span>
+                        <span style="color:{color}; font-weight:800;">{sign}{r['calories']} kcal</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with row_col2:
+                    if st.button("削除", key=f"del_{r['id']}"):
+                        st.session_state.meal_log = [m for m in st.session_state.meal_log if m["id"] != r["id"]]
+                        persist_log()
+                        st.rerun()
+        else:
+            st.info("📸 まずは「食事を記録」タブから、今日食べたものを撮ってみましょう")
+
+        st.divider()
+        if st.button("🗑 全記録を削除", type="secondary"):
+            st.session_state.meal_log = []
+            persist_log()
+            st.success("すべての記録を削除しました")
+            st.rerun()
 
 # ================================================================
 # タブ：写真を加工（フィルター・お皿検出・顔モザイクなど／重ね掛け可能）
