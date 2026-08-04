@@ -24,14 +24,6 @@ except Exception as _cv2_err:
     CV2_AVAILABLE = False
     _cv2_import_error = str(_cv2_err)
 
-# HOG特徴量（お皿の「丸さ」判定の補強に使用）も同様に安全に読み込む
-try:
-    from skimage.feature import hog
-    HOG_AVAILABLE = True
-except Exception as _hog_err:
-    HOG_AVAILABLE = False
-    _hog_import_error = str(_hog_err)
-
 
 # streamlit-drawable-canvas（自由に描いてモザイク範囲を指定するUI）
 # 過去にStreamlitの非公開APIとの相性で実行時エラーが起きたことがあるため、
@@ -46,6 +38,17 @@ except Exception as _canvas_err:
 # streamlit-drawable-canvas は内部でStreamlitの非公開API（image_to_url）に依存しており、
 # Streamlit Cloud側のバージョンとの相性で実行時エラーになったため使用をやめた。
 CANVAS_AVAILABLE = False
+
+# YOLO（ultralytics）による物体検出・セグメンテーション。
+# PyTorchはCPU専用版（requirements.txtで指定）でも数百MBあり、環境によっては
+# インストール・読み込みに失敗する可能性があるため、他のライブラリと同様に
+# importが失敗してもアプリ全体が止まらないよう安全に読み込む。
+try:
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
+except Exception as _yolo_err:
+    YOLO_AVAILABLE = False
+    _yolo_import_error = str(_yolo_err)
 
 # ================================================================
 # ページ設定
@@ -827,31 +830,6 @@ def _skin_mask(arr):
     cr, cb = ycrcb[:, :, 1], ycrcb[:, :, 2]
     return (cr >= 133) & (cr <= 178) & (cb >= 77) & (cb <= 127)
 
-def _hog_roundness_score(gray, x, y, bw, bh):
-    """
-    HOG特徴量（勾配方向ヒストグラム）を使って、その領域が
-    「丸い（お皿らしい）」か「四角い」かを判定する。
-
-    円・楕円は縁の勾配方向が全方位に分散するのに対し、四角形は
-    勾配方向が0度・90度付近に集中する。この性質を使い、勾配方向
-    ヒストグラムのエントロピー（分散の度合い）を「丸さスコア」とする。
-    0〜1で返し、1に近いほど丸い（お皿らしい）。
-    """
-    patch = gray[max(0, y):y + bh, max(0, x):x + bw]
-    if not HOG_AVAILABLE or patch.size == 0 or patch.shape[0] < 16 or patch.shape[1] < 16:
-        return 0.5  # 使えない・小さすぎる場合は中立値
-    try:
-        patch = cv2.resize(patch, (64, 64))
-        fd = hog(patch, orientations=9, pixels_per_cell=(8, 8),
-                  cells_per_block=(1, 1), feature_vector=True)
-        n_cells = fd.shape[0] // 9
-        orient_hist = fd.reshape(n_cells, 9).sum(axis=0)
-        orient_hist = orient_hist / (orient_hist.sum() + 1e-6)
-        entropy = -np.sum(orient_hist * np.log(orient_hist + 1e-9))
-        return float(entropy / np.log(9))  # 0〜1に正規化
-    except Exception:
-        return 0.5
-
 def detect_plate_outline_mask(image):
     """
     色を一切使わず、輪郭（エッジ）の形だけでお皿の大まかな外形を検出する。
@@ -862,15 +840,12 @@ def detect_plate_outline_mask(image):
     お皿の「縁」の輪郭が途切れるため、強めのブラー＋大きな閉じカーネルで
     模様を潰してから縁だけを拾う。それでも見つからなければ楕円フィッティングを試す。
 
-    候補が複数見つかった場合は、単純な面積の大小だけでなく、HOG特徴量による
-    「丸さスコア」も加味して最も皿らしい候補を選ぶ（四角いテーブルやランチョン
-    マットを誤って選ばないようにするため）。
+    候補が複数見つかった場合は、面積が最大のものを選ぶ。
 
     戻り値: (h, w) のbool配列（お皿の内側と思われる領域）。見つからなければNone。
     """
     arr = np.asarray(image.convert("RGB"))
     h, w = arr.shape[:2]
-    gray_full = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
 
     # --- 複数のパラメータで試行する（柄の多い皿→強いブラーが必要） ---
     candidates = []
@@ -904,10 +879,7 @@ def detect_plate_outline_mask(image):
             x, y, bw, bh = cv2.boundingRect(c)
             aspect = bw / max(bh, 1)
             if 0.55 <= extent <= 0.92 and 0.3 <= aspect <= 3.0:
-                # HOGで「丸さ」を追加スコアリングし、面積と組み合わせた総合スコアにする
-                roundness = _hog_roundness_score(gray_full, x, y, bw, bh)
-                score = area * (0.5 + 0.5 * roundness)  # 丸いほど加点、四角いほど減点
-                candidates.append((c, score))
+                candidates.append((c, area))
 
     if not candidates:
         return None
@@ -1282,6 +1254,61 @@ def _build_feather_mask(iw, ih, cx, cy, rx, ry, feather=0.18):
     norm_dist = np.sqrt(((x_idx - cx) / max(rx, 1)) ** 2 + ((y_idx - cy) / max(ry, 1)) ** 2)
     return np.clip((1.0 + feather - norm_dist) / (2 * feather), 0, 1).astype(np.float32)
 
+# ================================================================
+# 【AI補助】YOLO（物体検出・セグメンテーション）でお皿を検出
+# ----------------------------------------------------------------
+# COCOデータセットで学習済みのYOLOv8-segを使い、"bowl"（お皿・器）
+# などの物体を検出する。Geminiと違いAPIコール不要でローカルで動くため、
+# トークンは消費しない。ただしモデルの読み込みに数秒かかるため、
+# st.cache_resourceで一度だけ読み込むようにする。
+# ================================================================
+
+_YOLO_TARGET_CLASSES = ["bowl", "cup", "sandwich", "pizza", "cake", "dining table"]
+
+@st.cache_resource(show_spinner=False)
+def _load_yolo_model():
+    """YOLOv8-segモデルを読み込む（セッション内で1回だけ実行される）"""
+    return YOLO("yolov8n-seg.pt")
+
+def detect_food_region_yolo(image):
+    """
+    YOLOでお皿・料理らしき物体を検出し、セグメンテーションマスクから
+    楕円の中心・半径を推定する（他の検出関数と同じ形式で返す）。
+
+    戻り値: (x0, y0, x1, y1) のタプル。検出失敗時は None。
+    """
+    if not YOLO_AVAILABLE:
+        return None
+    try:
+        model = _load_yolo_model()
+        results = model(image.convert("RGB"), verbose=False)
+        r = results[0]
+        if r.boxes is None or len(r.boxes) == 0:
+            return None
+
+        # "bowl"を最優先に、関連クラスの中から確信度が最も高いものを選ぶ
+        best_idx, best_score = None, -1.0
+        for i, cls in enumerate(r.boxes.cls):
+            name = model.names[int(cls)]
+            conf = float(r.boxes.conf[i])
+            if name not in _YOLO_TARGET_CLASSES:
+                continue
+            # bowlクラスは優先的に選ばれるようボーナスを加える
+            priority = 0.3 if name == "bowl" else 0.0
+            score = conf + priority
+            if score > best_score:
+                best_score, best_idx = score, i
+
+        if best_idx is None:
+            return None
+
+        x0, y0, x1, y1 = r.boxes.xyxy[best_idx].tolist()
+        if x1 - x0 > 20 and y1 - y0 > 20:
+            return (int(x0), int(y0), int(x1), int(y1))
+        return None
+    except Exception:
+        return None
+
 def detect_food_region_gemini(image):
     """
     Gemini AIに画像を渡し、料理が写っている領域のバウンディングボックスを取得する。
@@ -1549,6 +1576,13 @@ with st.sidebar:
                 st.caption(f"cv2 import error: {_cv2_import_error}")
             if _cascade_load_error:
                 st.caption(f"cascade error: {_cascade_load_error}")
+
+    if YOLO_AVAILABLE:
+        st.success("✅ YOLO（ローカルAI検出）が使えます")
+    else:
+        st.warning("⚠️ YOLOは現在利用できません（CV検出・Geminiは使えます）")
+        with st.expander("詳細"):
+            st.caption(f"YOLO import error: {_yolo_import_error}")
 
     with st.expander("💾 保存状態（デバッグ用）", expanded=False):
         st.caption(f"現在の記録件数: {len(st.session_state.meal_log)}")
@@ -2053,12 +2087,20 @@ with tab_photo:
         st.session_state["_photo_version"] = st.session_state.get("_photo_version", 0) + 1
 
         # ---- お皿の位置を検出し、フェザリング付き楕円マスクを生成する ----
-        # まずGeminiを使わずCV検出（色・Hough変換）だけで試す。
-        # トークンを消費しないこちらを基本とし、精度が悪い場合だけ
-        # ユーザーが「Geminiでお皿を再検出」ボタンを押して呼び出す。
-        if CV2_AVAILABLE:
+        # ①まずYOLO（ローカルで動くセグメンテーションAI）を試す。
+        #   Geminiと違いAPIコール不要でトークンを消費しない。
+        # ②YOLOが使えない・検出できない場合はCV検出（色・Hough変換）にフォールバック。
+        # ③それでも精度が悪ければ、ユーザーが「Geminiで再検出」ボタンを押して呼び出す。
+        iw, ih = new_source_img.size
+        roi = detect_food_region_yolo(new_source_img) if YOLO_AVAILABLE else None
+        if roi is not None:
+            x0, y0, x1, y1 = roi
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            rx, ry = (x1 - x0) / 2, (y1 - y0) / 2
+            st.session_state["_confirmed_food_mask"] = _build_feather_mask(iw, ih, cx, cy, rx, ry)
+            st.session_state["_mask_source"] = "yolo"
+        elif CV2_AVAILABLE:
             plate_cx, plate_cy, plate_rx, plate_ry, _method = detect_plate_region(new_source_img)
-            iw, ih = new_source_img.size
             st.session_state["_confirmed_food_mask"] = _build_feather_mask(iw, ih, plate_cx, plate_cy, plate_rx, plate_ry)
             st.session_state["_mask_source"] = "cv"
         else:
@@ -2073,27 +2115,42 @@ with tab_photo:
         food_mask = st.session_state.get("_confirmed_food_mask")
         mask_ready = food_mask is not None
 
-        # ---- 精度が悪い場合だけ、Geminiで再検出する（明示的なボタン操作でのみ呼び出す） ----
-        if gemini_ready:
-            gcol1, gcol2 = st.columns([3, 1])
-            with gcol1:
-                mask_src_label = "CV検出（色・形）" if st.session_state.get("_mask_source") == "cv" else "Gemini AI"
-                st.caption(f"現在のお皿検出：{mask_src_label} 　精度が悪い場合は右のボタンでAIに再検出させられます")
-            with gcol2:
-                if st.button("🤖 Geminiで再検出", key="gemini_redetect", use_container_width=True):
-                    with st.spinner("Geminiがお皿の位置を再検出中..."):
-                        roi = detect_food_region_gemini(work_img)
-                    if roi is not None:
-                        x0, y0, x1, y1 = roi
-                        gcx, gcy = (x0 + x1) / 2, (y0 + y1) / 2
-                        grx, gry = (x1 - x0) / 2, (y1 - y0) / 2
-                        iw, ih = work_img.size
-                        st.session_state["_confirmed_food_mask"] = _build_feather_mask(iw, ih, gcx, gcy, grx, gry)
-                        st.session_state["_mask_source"] = "gemini"
-                        st.toast("Geminiでお皿を再検出しました", icon="✅")
-                        st.rerun()
-                    else:
-                        st.warning("Geminiでも料理を検出できませんでした")
+        # ---- 精度が悪い場合だけ、YOLO／Geminiで再検出する（明示的なボタン操作でのみ実行） ----
+        mask_src_labels = {"yolo": "YOLO（ローカルAI）", "cv": "CV検出（色・形）", "gemini": "Gemini AI"}
+        mask_src_label = mask_src_labels.get(st.session_state.get("_mask_source"), "未検出")
+        st.caption(f"現在のお皿検出：{mask_src_label} 　精度が悪い場合は下のボタンで再検出できます")
+
+        rcol1, rcol2 = st.columns(2)
+        with rcol1:
+            if YOLO_AVAILABLE and st.button("🎯 YOLOで再検出", key="yolo_redetect", use_container_width=True):
+                with st.spinner("YOLOがお皿の位置を再検出中..."):
+                    roi = detect_food_region_yolo(work_img)
+                if roi is not None:
+                    x0, y0, x1, y1 = roi
+                    ycx, ycy = (x0 + x1) / 2, (y0 + y1) / 2
+                    yrx, yry = (x1 - x0) / 2, (y1 - y0) / 2
+                    iw, ih = work_img.size
+                    st.session_state["_confirmed_food_mask"] = _build_feather_mask(iw, ih, ycx, ycy, yrx, yry)
+                    st.session_state["_mask_source"] = "yolo"
+                    st.toast("YOLOでお皿を再検出しました", icon="✅")
+                    st.rerun()
+                else:
+                    st.warning("YOLOでも料理を検出できませんでした")
+        with rcol2:
+            if gemini_ready and st.button("🤖 Geminiで再検出", key="gemini_redetect", use_container_width=True):
+                with st.spinner("Geminiがお皿の位置を再検出中..."):
+                    roi = detect_food_region_gemini(work_img)
+                if roi is not None:
+                    x0, y0, x1, y1 = roi
+                    gcx, gcy = (x0 + x1) / 2, (y0 + y1) / 2
+                    grx, gry = (x1 - x0) / 2, (y1 - y0) / 2
+                    iw, ih = work_img.size
+                    st.session_state["_confirmed_food_mask"] = _build_feather_mask(iw, ih, gcx, gcy, grx, gry)
+                    st.session_state["_mask_source"] = "gemini"
+                    st.toast("Geminiでお皿を再検出しました", icon="✅")
+                    st.rerun()
+                else:
+                    st.warning("Geminiでも料理を検出できませんでした")
 
         food_mask = st.session_state.get("_confirmed_food_mask")
         mask_ready = food_mask is not None
