@@ -25,20 +25,6 @@ except Exception as _cv2_err:
     _cv2_import_error = str(_cv2_err)
 
 
-# streamlit-drawable-canvas（自由に描いてモザイク範囲を指定するUI）
-# 過去にStreamlitの非公開APIとの相性で実行時エラーが起きたことがあるため、
-# importだけでなく実際に呼び出す箇所でもtry/exceptで保護する
-try:
-    from streamlit_drawable_canvas import st_canvas
-    CANVAS_AVAILABLE = True
-except Exception as _canvas_err:
-    CANVAS_AVAILABLE = False
-    _canvas_import_error = str(_canvas_err)
-
-# streamlit-drawable-canvas は内部でStreamlitの非公開API（image_to_url）に依存しており、
-# Streamlit Cloud側のバージョンとの相性で実行時エラーになったため使用をやめた。
-CANVAS_AVAILABLE = False
-
 # ================================================================
 # ページ設定
 # ================================================================
@@ -776,14 +762,6 @@ def mosaic_outside_mask(image, keep_mask, block=18):
     out = np.where(mask_bin, arr, mosaic_full)
     return Image.fromarray(out.astype(np.uint8))
 
-def mosaic_within_mask(image, draw_mask, block=16):
-    """描いた場所（draw_mask内）だけをモザイク化する"""
-    image = image.convert("RGB")
-    arr = np.array(image)
-    mosaic_full = np.array(pixelate(image, block=block))
-    mask_bin = (draw_mask > 0.5)[..., None]
-    out = np.where(mask_bin, mosaic_full, arr)
-    return Image.fromarray(out.astype(np.uint8))
 # ================================================================
 # 【自作のCV処理】料理だけを「美味しそうな色味」に補正する
 # ----------------------------------------------------------------
@@ -2109,37 +2087,3 @@ with tab_photo:
                         st.session_state["_work_image"] = st.session_state["_pre_mosaic_image"]
                         st.session_state["_pre_mosaic_image"] = None
                         st.rerun()
-
-                    st.caption("🖌️ 自分でモザイク範囲を描く")
-                    if CANVAS_AVAILABLE:
-                        try:
-                            canvas_w = min(work_img.width, 420)
-                            canvas_scale = canvas_w / work_img.width
-                            canvas_h = int(work_img.height * canvas_scale)
-                            canvas_result = st_canvas(
-                                fill_color="rgba(255,0,0,0.35)",
-                                stroke_width=22,
-                                stroke_color="#FF3333",
-                                background_image=work_img.resize((canvas_w, canvas_h)),
-                                update_streamlit=True,
-                                height=canvas_h, width=canvas_w,
-                                drawing_mode="freedraw",
-                                key="mosaic_draw_canvas",
-                            )
-                            if st.button("🖌️ 描いた場所をモザイクにする", key="apply_draw_mosaic", use_container_width=True):
-                                if canvas_result is not None and canvas_result.image_data is not None:
-                                    alpha = canvas_result.image_data[:, :, 3]
-                                    drawn_small = (alpha > 0)
-                                    drawn_full = cv2.resize(
-                                        drawn_small.astype(np.uint8), (work_img.width, work_img.height),
-                                        interpolation=cv2.INTER_NEAREST,
-                                    ).astype(np.float32)
-                                    if drawn_full.max() > 0:
-                                        result_img = mosaic_within_mask(work_img, drawn_full, block=16)
-                                        _apply_mosaic(result_img)
-                                    else:
-                                        st.warning("まだ何も描かれていません")
-                        except Exception as _canvas_runtime_err:
-                            st.info("⚠️ この環境では「描いて指定」機能が使えませんでした（お皿・顔のボタンは通常通り使えます）")
-                    else:
-                        st.caption("（この環境では「描いて指定」ライブラリが読み込めませんでした）")
